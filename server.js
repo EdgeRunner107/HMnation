@@ -534,10 +534,6 @@ app.post('/accountgetter/:login_id', async (req, res) => {
       lines[depositIndex];
 
 
-    // 입금 10,000원
-    // 입금 10000원
-    // 둘 다 대응
-
     const amountMatch =
       depositLine.match(
         /입금\s*([\d,]+)\s*원?/
@@ -575,17 +571,17 @@ app.post('/accountgetter/:login_id', async (req, res) => {
 
 
     // ==================================================
-    // 5. 입금자명 찾기
+    // 5. 입금자명 원본 찾기
     //
-    // 현재 기업은행 문자 구조:
+    // 예:
     //
-    // 입금 10,000원
-    // 잔액 13,607원
-    // 경석느금
+    // 입금 1,000원
+    // 잔액 4,607원
+    // 경석/되냐
     // 666***58901011
     // 기업
     //
-    // 따라서 "잔액" 다음 줄을 입금자명으로 사용
+    // "잔액" 다음 줄을 입금자 정보로 사용
     // ==================================================
 
     const balanceIndex =
@@ -596,7 +592,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
       );
 
 
-    let donorName = '';
+    let rawDonorText = '';
 
 
     if (
@@ -604,24 +600,22 @@ app.post('/accountgetter/:login_id', async (req, res) => {
       lines[balanceIndex + 1]
     ) {
 
-      donorName =
+      rawDonorText =
         lines[balanceIndex + 1];
 
     }
 
 
-    // 혹시 잔액 줄을 못 찾으면
-    // 입금 줄 + 2번째 줄을 fallback으로 사용
+    // 잔액 줄을 못 찾은 경우 fallback
+    if (!rawDonorText) {
 
-    if (!donorName) {
-
-      donorName =
+      rawDonorText =
         lines[depositIndex + 2] || '';
 
     }
 
 
-    if (!donorName) {
+    if (!rawDonorText) {
 
       return res.status(400).json({
         ok: false,
@@ -632,7 +626,61 @@ app.post('/accountgetter/:login_id', async (req, res) => {
 
 
     // ==================================================
-    // 6. 파싱 결과
+    // 6. 닉네임 / 텍스트 분리
+    //
+    // "경석/되냐"
+    // donor_name = "경석"
+    // text       = "되냐"
+    //
+    // "경석느금"
+    // donor_name = "경석느금"
+    // text       = "경석느금"
+    //
+    // "경석/오늘/방송/화이팅"
+    // donor_name = "경석"
+    // text       = "오늘/방송/화이팅"
+    // ==================================================
+
+    let donorName =
+      rawDonorText.trim();
+
+    let donationText =
+      rawDonorText.trim();
+
+
+    if (rawDonorText.includes('/')) {
+
+      const slashIndex =
+        rawDonorText.indexOf('/');
+
+
+      const nicknamePart =
+        rawDonorText
+          .slice(0, slashIndex)
+          .trim();
+
+
+      const textPart =
+        rawDonorText
+          .slice(slashIndex + 1)
+          .trim();
+
+
+      if (nicknamePart) {
+        donorName = nicknamePart;
+      }
+
+      if (textPart) {
+        donationText = textPart;
+      } else {
+        donationText = donorName;
+      }
+
+    }
+
+
+    // ==================================================
+    // 7. 최종 파싱 로그
     // ==================================================
 
     console.log(
@@ -640,8 +688,18 @@ app.post('/accountgetter/:login_id', async (req, res) => {
     );
 
     console.log(
+      '원본 입금자 문자열:',
+      rawDonorText
+    );
+
+    console.log(
       '후원자명:',
       donorName
+    );
+
+    console.log(
+      '텍스트:',
+      donationText
     );
 
     console.log(
@@ -651,7 +709,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
 
 
     // ==================================================
-    // 7. 유저 확인
+    // 8. 유저 확인
     // ==================================================
 
     const {
@@ -705,7 +763,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
 
 
     // ==================================================
-    // 8. bank_donations 저장
+    // 9. bank_donations 저장
     // ==================================================
 
     const insertData = {
@@ -719,9 +777,8 @@ app.post('/accountgetter/:login_id', async (req, res) => {
       amount:
         amount,
 
-      // 계좌후원에는 별도 메시지가 없으므로 비움
       text:
-        '',
+        donationText,
 
       executed:
         false
@@ -771,7 +828,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
 
 
     // ==================================================
-    // 9. 성공
+    // 10. 성공
     // ==================================================
 
     console.log('\n----------------------------------------');
@@ -779,6 +836,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
     console.log('ID:', donation.id);
     console.log('후원자:', donation.donor_name);
     console.log('금액:', donation.amount);
+    console.log('텍스트:', donation.text);
     console.log('executed:', donation.executed);
     console.log('----------------------------------------\n');
 
@@ -788,11 +846,16 @@ app.post('/accountgetter/:login_id', async (req, res) => {
       ok: true,
 
       parsed: {
+
         donor_name:
           donorName,
 
         amount:
-          amount
+          amount,
+
+        text:
+          donationText
+
       },
 
       donation
@@ -816,7 +879,6 @@ app.post('/accountgetter/:login_id', async (req, res) => {
   }
 
 });
-
 
 
 
