@@ -696,7 +696,6 @@ app.post('/api/donations/:id/complete', async (req, res) => {
 // }
 //
 // ======================================================
-
 app.post('/accountgetter/:login_id', async (req, res) => {
 
   const { login_id } = req.params;
@@ -758,7 +757,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
 
     const lines = rawText
       .split(/\r?\n/)
-      .map(line => line.trim())
+      .map((line) => line.trim())
       .filter(Boolean);
 
 
@@ -769,20 +768,118 @@ app.post('/accountgetter/:login_id', async (req, res) => {
 
 
     // ==================================================
-    // 4. "입금 10,000원" 찾기
+    // 4. 입금 금액 파싱
+    //
+    // 지원 형식 1
+    // 입금 10,000원
+    //
+    // 지원 형식 2
+    // 5,000원 입금 되었어요.
     // ==================================================
 
-    const depositIndex =
-      lines.findIndex(line =>
-        /^입금\s*/.test(line)
-      );
+    let amount = null;
+    let depositIndex = -1;
+    let kakaoPaySecurities = false;
 
 
-    if (depositIndex === -1) {
+    // --------------------------------------------------
+    // 기존 은행 문자 형식
+    //
+    // 입금 10,000원
+    // --------------------------------------------------
+
+    depositIndex = lines.findIndex((line) =>
+      /^입금\s*/.test(line)
+    );
+
+
+    if (depositIndex !== -1) {
+
+      const depositLine =
+        lines[depositIndex];
+
+
+      const amountMatch =
+        depositLine.match(
+          /입금\s*([\d,]+)\s*원?/
+        );
+
+
+      if (amountMatch) {
+
+        amount =
+          Number(
+            amountMatch[1]
+              .replace(/,/g, '')
+          );
+
+      }
+
+    }
+
+
+    // --------------------------------------------------
+    // 카카오페이증권 형식
+    //
+    // 5,000원 입금 되었어요.
+    // --------------------------------------------------
+
+    if (!amount) {
+
+      const kakaoIndex =
+        lines.findIndex((line) =>
+          /^\s*[\d,]+\s*원\s*입금/.test(line)
+        );
+
+
+      if (kakaoIndex !== -1) {
+
+        const kakaoLine =
+          lines[kakaoIndex];
+
+
+        const kakaoAmountMatch =
+          kakaoLine.match(
+            /([\d,]+)\s*원\s*입금/
+          );
+
+
+        if (kakaoAmountMatch) {
+
+          amount =
+            Number(
+              kakaoAmountMatch[1]
+                .replace(/,/g, '')
+            );
+
+
+          depositIndex =
+            kakaoIndex;
+
+
+          kakaoPaySecurities =
+            true;
+
+        }
+
+      }
+
+    }
+
+
+    // --------------------------------------------------
+    // 금액을 찾지 못한 경우
+    // --------------------------------------------------
+
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
 
       console.log(
-        '[ACCOUNTGETTER] ❌ 입금 문구 없음'
+        '[ACCOUNTGETTER] ❌ 입금 금액을 찾지 못함'
       );
+
 
       return res.status(400).json({
         ok: false,
@@ -792,87 +889,75 @@ app.post('/accountgetter/:login_id', async (req, res) => {
     }
 
 
-    const depositLine =
-      lines[depositIndex];
-
-
-    const amountMatch =
-      depositLine.match(
-        /입금\s*([\d,]+)\s*원?/
-      );
-
-
-    if (!amountMatch) {
-
-      return res.status(400).json({
-        ok: false,
-        error: 'Invalid deposit amount'
-      });
-
-    }
-
-
-    const amount =
-      Number(
-        amountMatch[1]
-          .replace(/,/g, '')
-      );
-
-
-    if (
-      !Number.isFinite(amount) ||
-      amount <= 0
-    ) {
-
-      return res.status(400).json({
-        ok: false,
-        error: 'Invalid amount'
-      });
-
-    }
-
-
     // ==================================================
-    // 5. 입금자명 원본 찾기
+    // 5. 입금자 정보 찾기
+    // ==================================================
+
+    let rawDonorText = '';
+
+
+    // --------------------------------------------------
+    // 카카오페이증권
     //
-    // 예:
+    // 문자에 입금자명이 없으므로 익명 처리
+    // --------------------------------------------------
+
+    if (kakaoPaySecurities) {
+
+      rawDonorText =
+        '익명';
+
+
+      console.log(
+        '[ACCOUNTGETTER] 카카오페이증권 알림 감지'
+      );
+
+
+      console.log(
+        '[ACCOUNTGETTER] 입금자명이 없어 익명 처리'
+      );
+
+    }
+
+
+    // --------------------------------------------------
+    // 기존 은행 문자
     //
     // 입금 1,000원
     // 잔액 4,607원
     // 경석/되냐
     // 666***58901011
     // 기업
-    //
-    // "잔액" 다음 줄을 입금자 정보로 사용
-    // ==================================================
+    // --------------------------------------------------
 
-    const balanceIndex =
-      lines.findIndex(
-        (line, index) =>
-          index > depositIndex &&
-          /^잔액\s*/.test(line)
-      );
+    else {
 
-
-    let rawDonorText = '';
+      const balanceIndex =
+        lines.findIndex(
+          (line, index) =>
+            index > depositIndex &&
+            /^잔액\s*/.test(line)
+        );
 
 
-    if (
-      balanceIndex !== -1 &&
-      lines[balanceIndex + 1]
-    ) {
+      if (
+        balanceIndex !== -1 &&
+        lines[balanceIndex + 1]
+      ) {
 
-      rawDonorText =
-        lines[balanceIndex + 1];
+        rawDonorText =
+          lines[balanceIndex + 1];
 
-    }
+      }
 
 
-    // 잔액 줄을 못 찾은 경우 fallback
-    if (!rawDonorText) {
+      // 기존 fallback 유지
+      if (!rawDonorText) {
 
-      rawDonorText =
-        lines[depositIndex + 2] || '';
+        rawDonorText =
+          lines[depositIndex + 2] || '';
+
+      }
 
     }
 
@@ -901,6 +986,10 @@ app.post('/accountgetter/:login_id', async (req, res) => {
     // "경석/오늘/방송/화이팅"
     // donor_name = "경석"
     // text       = "오늘/방송/화이팅"
+    //
+    // 카카오페이증권
+    // donor_name = "익명"
+    // text       = "익명"
     // ==================================================
 
     let donorName =
@@ -929,13 +1018,23 @@ app.post('/accountgetter/:login_id', async (req, res) => {
 
 
       if (nicknamePart) {
-        donorName = nicknamePart;
+
+        donorName =
+          nicknamePart;
+
       }
 
+
       if (textPart) {
-        donationText = textPart;
+
+        donationText =
+          textPart;
+
       } else {
-        donationText = donorName;
+
+        donationText =
+          donorName;
+
       }
 
     }
@@ -949,24 +1048,36 @@ app.post('/accountgetter/:login_id', async (req, res) => {
       '[ACCOUNTGETTER] ✅ 문자 파싱 완료'
     );
 
+
     console.log(
       '원본 입금자 문자열:',
       rawDonorText
     );
+
 
     console.log(
       '후원자명:',
       donorName
     );
 
+
     console.log(
       '텍스트:',
       donationText
     );
 
+
     console.log(
       '금액:',
       amount
+    );
+
+
+    console.log(
+      '형식:',
+      kakaoPaySecurities
+        ? '카카오페이증권'
+        : '기존 은행문자'
     );
 
 
@@ -995,6 +1106,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
         '[ACCOUNTGETTER] 유저 조회 오류:',
         userError
       );
+
 
       return res.status(500).json({
         ok: false,
@@ -1081,6 +1193,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
         insertError
       );
 
+
       return res.status(500).json({
         ok: false,
         error: 'Donation insert failed'
@@ -1106,6 +1219,11 @@ app.post('/accountgetter/:login_id', async (req, res) => {
     return res.status(201).json({
 
       ok: true,
+
+      source:
+        kakaoPaySecurities
+          ? 'kakaopay_securities'
+          : 'bank',
 
       parsed: {
 
@@ -1141,13 +1259,6 @@ app.post('/accountgetter/:login_id', async (req, res) => {
   }
 
 });
-
-
-
-
-
-
-
 
 
 
