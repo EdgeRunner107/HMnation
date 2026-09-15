@@ -181,6 +181,212 @@ app.post('/api/login', async (req, res) => {
 
 
 // ======================================================
+// User donations by login_id in the URL
+// ======================================================
+
+app.get(['/api/u', '/api/u/:login_id'], async (req, res) => {
+  try {
+    const { login_id } = req.params;
+    console.log(`[USER DONATIONS] request login_id=${login_id || ''}`);
+
+    if (!login_id || !login_id.trim()) {
+      return res.status(400).json({ ok: false, error: 'login_id is required' });
+    }
+
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id, login_id, is_active')
+      .eq('login_id', login_id)
+      .maybeSingle();
+
+    if (userError) throw userError;
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    if (user.is_active === false) {
+      return res.status(403).json({ ok: false, error: 'User is inactive' });
+    }
+
+    console.log(`[USER DONATIONS] user_id=${user.id}`);
+
+    const { data: donations, error: donationsError } = await supabase
+      .from('bank_donations')
+      .select('id, user_id, donor_name, amount, text, executed, created_at, executed_at')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    if (donationsError) throw donationsError;
+
+    console.log(`[USER DONATIONS] rows=${(donations || []).length}`);
+    return res.json({
+      ok: true,
+      login_id: user.login_id,
+      user_id: user.id,
+      donations: donations || []
+    });
+  } catch (error) {
+    console.error('[USER DONATIONS] lookup failed:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/u/:login_id/next', async (req, res) => {
+  try {
+    const { login_id } = req.params;
+    console.log(`[USER DONATIONS NEXT] request login_id=${login_id || ''}`);
+
+    if (!login_id || !login_id.trim()) {
+      return res.status(400).json({ ok: false, error: 'login_id is required' });
+    }
+
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id, login_id, is_active')
+      .eq('login_id', login_id)
+      .maybeSingle();
+
+    if (userError) throw userError;
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    if (user.is_active === false) {
+      return res.status(403).json({ ok: false, error: 'User is inactive' });
+    }
+
+    console.log(`[USER DONATIONS NEXT] user_id=${user.id}`);
+
+    const { data: donation, error: donationError } = await supabase
+      .from('bank_donations')
+      .select('id, donor_name, amount, text, created_at')
+      .eq('user_id', user.id)
+      .eq('executed', false)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (donationError) throw donationError;
+
+    console.log(donation
+      ? `[USER DONATIONS NEXT] donation_id=${donation.id}`
+      : '[USER DONATIONS NEXT] no pending donation');
+    return res.json({
+      ok: true,
+      login_id: user.login_id,
+      donation: donation || null
+    });
+  } catch (error) {
+    console.error('[USER DONATIONS NEXT] lookup failed:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+
+// ======================================================
+// Current donation ranking and reset for a user
+// ======================================================
+
+app.get('/api/u/:login_id/ranking', async (req, res) => {
+  try {
+    const { login_id } = req.params;
+    console.log(`[USER RANKING] request login_id=${login_id || ''}`);
+
+    if (!login_id || !login_id.trim()) {
+      return res.status(400).json({ ok: false, error: 'login_id is required' });
+    }
+
+    const requestedLimit = typeof req.query.limit === 'string'
+      ? Number(req.query.limit)
+      : NaN;
+    const limit = Number.isInteger(requestedLimit) && requestedLimit >= 1 && requestedLimit <= 100
+      ? requestedLimit
+      : 6;
+
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id, login_id, is_active, ranking_reset_at')
+      .eq('login_id', login_id)
+      .maybeSingle();
+
+    if (userError) throw userError;
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    if (user.is_active === false) {
+      return res.status(403).json({ ok: false, error: 'User is inactive' });
+    }
+
+    console.log(`[USER RANKING] user_id=${user.id}`);
+    console.log(`[USER RANKING] limit=${limit}`);
+
+    const { data: ranking, error: rankingError } = await supabase.rpc(
+      'get_current_donation_ranking',
+      { p_user_id: user.id, p_limit: limit }
+    );
+
+    if (rankingError) throw rankingError;
+
+    console.log(`[USER RANKING] rows=${(ranking || []).length}`);
+    return res.json({
+      ok: true,
+      login_id: user.login_id,
+      ranking_reset_at: user.ranking_reset_at,
+      ranking: ranking || []
+    });
+  } catch (error) {
+    console.error('[USER RANKING] lookup failed:', error);
+    return res.status(500).json({ ok: false, error: 'Ranking lookup failed' });
+  }
+});
+
+app.post('/api/u/:login_id/ranking/reset', async (req, res) => {
+  try {
+    const { login_id } = req.params;
+    console.log(`[RANKING RESET] request login_id=${login_id || ''}`);
+
+    if (!login_id || !login_id.trim()) {
+      return res.status(400).json({ ok: false, error: 'login_id is required' });
+    }
+
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id, login_id, is_active')
+      .eq('login_id', login_id)
+      .maybeSingle();
+
+    if (userError) throw userError;
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    if (user.is_active === false) {
+      return res.status(403).json({ ok: false, error: 'User is inactive' });
+    }
+
+    console.log(`[RANKING RESET] user_id=${user.id}`);
+    const resetAt = new Date().toISOString();
+
+    const { data: updatedUser, error: updateError } = await supabase
+      .from('users')
+      .update({ ranking_reset_at: resetAt })
+      .eq('id', user.id)
+      .select('id, login_id, ranking_reset_at')
+      .single();
+
+    if (updateError) throw updateError;
+
+    console.log(`[RANKING RESET] ranking_reset_at=${updatedUser.ranking_reset_at}`);
+    return res.json({
+      ok: true,
+      login_id: updatedUser.login_id,
+      ranking_reset_at: updatedUser.ranking_reset_at
+    });
+  } catch (error) {
+    console.error('[RANKING RESET] update failed:', error);
+    return res.status(500).json({ ok: false, error: 'Ranking reset failed' });
+  }
+});
+
+
+// ======================================================
 // All donations for a user
 //
 // GET /api/donations?login_id=testuser
