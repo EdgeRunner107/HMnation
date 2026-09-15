@@ -59,6 +59,268 @@ app.get('/', (req, res) => {
 // GET /api/donations/next?login_id=testuser
 // ======================================================
 
+// ======================================================
+// Login
+//
+// POST /api/login
+// ======================================================
+
+app.post('/api/login', async (req, res) => {
+
+  const {
+    login_id,
+    password
+  } = req.body || {};
+
+
+  if (
+    !login_id ||
+    !password ||
+    typeof login_id !== 'string' ||
+    typeof password !== 'string'
+  ) {
+
+    return res.status(400).json({
+      ok: false,
+      error: 'login_id and password are required'
+    });
+
+  }
+
+
+  try {
+
+    const {
+      data: user,
+      error: userError
+    } = await supabase
+      .from('users')
+      .select(`
+        id,
+        login_id,
+        password,
+        payment_date,
+        is_active
+      `)
+      .eq('login_id', login_id)
+      .maybeSingle();
+
+
+    if (userError) {
+
+      console.error(
+        'Login user lookup failed:',
+        userError
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error: 'Login failed'
+      });
+
+    }
+
+
+    if (!user || user.password !== password) {
+
+      return res.status(401).json({
+        ok: false,
+        error: 'Invalid login credentials'
+      });
+
+    }
+
+
+    if (user.is_active === false) {
+
+      return res.status(403).json({
+        ok: false,
+        error: 'User is inactive'
+      });
+
+    }
+
+
+    return res.json({
+
+      ok: true,
+
+      user: {
+        id:
+          user.id,
+
+        login_id:
+          user.login_id,
+
+        payment_date:
+          user.payment_date,
+
+        is_active:
+          user.is_active
+      }
+
+    });
+
+
+  } catch (error) {
+
+    console.error(
+      'Unexpected error in POST /api/login:',
+      error
+    );
+
+
+    return res.status(500).json({
+      ok: false,
+      error: 'Internal server error'
+    });
+
+  }
+
+});
+
+
+// ======================================================
+// All donations for a user
+//
+// GET /api/donations?login_id=testuser
+// ======================================================
+
+app.get('/api/donations', async (req, res) => {
+
+  const { login_id } = req.query;
+
+
+  if (!login_id || typeof login_id !== 'string') {
+
+    return res.status(400).json({
+      ok: false,
+      error: 'login_id query parameter is required'
+    });
+
+  }
+
+
+  try {
+
+    const {
+      data: user,
+      error: userError
+    } = await supabase
+      .from('users')
+      .select('id, login_id, is_active')
+      .eq('login_id', login_id)
+      .maybeSingle();
+
+
+    if (userError) {
+
+      console.error(
+        'User lookup failed:',
+        userError
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error: 'User lookup failed'
+      });
+
+    }
+
+
+    if (!user) {
+
+      return res.status(404).json({
+        ok: false,
+        error: 'User not found'
+      });
+
+    }
+
+
+    if (user.is_active === false) {
+
+      return res.status(403).json({
+        ok: false,
+        error: 'User is inactive'
+      });
+
+    }
+
+
+    const {
+      data: donations,
+      error: donationsError
+    } = await supabase
+      .from('bank_donations')
+      .select(`
+        id,
+        user_id,
+        donor_name,
+        amount,
+        text,
+        executed,
+        created_at,
+        executed_at
+      `)
+      .eq('user_id', user.id)
+      .order(
+        'created_at',
+        {
+          ascending: false
+        }
+      );
+
+
+    if (donationsError) {
+
+      console.error(
+        'Donations lookup failed:',
+        donationsError
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error: 'Donations lookup failed'
+      });
+
+    }
+
+
+    return res.json({
+
+      ok: true,
+
+      donations:
+        donations || []
+
+    });
+
+
+  } catch (error) {
+
+    console.error(
+      'Unexpected error in GET /api/donations:',
+      error
+    );
+
+
+    return res.status(500).json({
+      ok: false,
+      error: 'Internal server error'
+    });
+
+  }
+
+});
+
+
+// ======================================================
+// Next pending donation for a user
+//
+// GET /api/donations/next?login_id=testuser
+// ======================================================
+
 app.get('/api/donations/next', async (req, res) => {
 
   const { login_id } = req.query;
