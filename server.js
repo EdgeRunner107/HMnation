@@ -35,6 +35,8 @@ const supabase = createClient(
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.text({ type: 'text/plain' }));
 
 
 // ======================================================
@@ -410,112 +412,247 @@ app.post('/api/donations/:id/complete', async (req, res) => {
 });
 
 
-
-
+// ======================================================
+// 계좌 입금 문자 수신 API
+//
+// POST /accountgetter/:login_id
+//
+// 지원 형식
+//
+// 1. text/plain
+// 문자 원문 그대로 전송
+//
+// 2. application/json
+// {
+//   "text": "문자 원문"
+// }
+//
+// 또는
+//
+// {
+//   "message": "문자 원문"
+// }
+//
+// ======================================================
 
 app.post('/accountgetter/:login_id', async (req, res) => {
 
   const { login_id } = req.params;
 
-  const {
-    donor_name,
-    amount,
-    text
-  } = req.body;
+  try {
+
+    // ==================================================
+    // 1. 휴대폰에서 들어온 원본 문자 추출
+    // ==================================================
+
+    let rawText = '';
+
+    // text/plain으로 들어온 경우
+    if (typeof req.body === 'string') {
+
+      rawText = req.body;
+
+    }
+
+    // JSON으로 들어온 경우
+    else if (req.body && typeof req.body === 'object') {
+
+      rawText =
+        req.body.text ||
+        req.body.message ||
+        req.body.sms ||
+        req.body.body ||
+        '';
+
+    }
 
 
-  // ======================================================
-  // 1. 들어온 원본 데이터 로그
-  // ======================================================
-
-  console.log('\n========================================');
-  console.log('[ACCOUNTGETTER] 요청 수신');
-  console.log('시간:', new Date().toISOString());
-  console.log('login_id:', login_id);
-  console.log('body 원본:', req.body);
-  console.log('donor_name:', donor_name);
-  console.log('amount:', amount);
-  console.log('text:', text);
-  console.log('========================================\n');
+    console.log('\n========================================');
+    console.log('[ACCOUNTGETTER] 📱 문자 수신');
+    console.log('login_id:', login_id);
+    console.log('Content-Type:', req.headers['content-type']);
+    console.log('원본 body:', req.body);
+    console.log('원본 문자:\n' + rawText);
+    console.log('========================================\n');
 
 
-  // ======================================================
-  // 2. 기본 검증
-  // ======================================================
+    // ==================================================
+    // 2. 문자 존재 여부
+    // ==================================================
 
-  if (!login_id) {
-    console.log('[ACCOUNTGETTER] ❌ login_id 없음');
+    if (!rawText || typeof rawText !== 'string') {
 
-    return res.status(400).json({
-      ok: false,
-      error: 'login_id is required'
-    });
-  }
+      return res.status(400).json({
+        ok: false,
+        error: 'SMS text is required'
+      });
 
-
-  if (!donor_name || typeof donor_name !== 'string') {
-    console.log('[ACCOUNTGETTER] ❌ donor_name 오류:', donor_name);
-
-    return res.status(400).json({
-      ok: false,
-      error: 'donor_name is required'
-    });
-  }
+    }
 
 
-  // ======================================================
-  // 3. 금액 정리
-  //
-  // 예:
-  // "20,000원"
-  // "20,000"
-  // 20000
-  //
-  // -> 20000
-  // ======================================================
+    // ==================================================
+    // 3. 줄 단위 정리
+    // ==================================================
 
-  const parsedAmount =
-    Number(
-      String(amount ?? '')
-        .replace(/[^\d]/g, '')
+    const lines = rawText
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+
+
+    console.log(
+      '[ACCOUNTGETTER] 문자 줄:',
+      lines
     );
 
 
-  console.log(
-    '[ACCOUNTGETTER] 금액 변환:',
-    amount,
-    '→',
-    parsedAmount
-  );
+    // ==================================================
+    // 4. "입금 10,000원" 찾기
+    // ==================================================
+
+    const depositIndex =
+      lines.findIndex(line =>
+        /^입금\s*/.test(line)
+      );
 
 
-  if (
-    !Number.isFinite(parsedAmount) ||
-    parsedAmount <= 0
-  ) {
+    if (depositIndex === -1) {
+
+      console.log(
+        '[ACCOUNTGETTER] ❌ 입금 문구 없음'
+      );
+
+      return res.status(400).json({
+        ok: false,
+        error: 'Deposit amount not found'
+      });
+
+    }
+
+
+    const depositLine =
+      lines[depositIndex];
+
+
+    // 입금 10,000원
+    // 입금 10000원
+    // 둘 다 대응
+
+    const amountMatch =
+      depositLine.match(
+        /입금\s*([\d,]+)\s*원?/
+      );
+
+
+    if (!amountMatch) {
+
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid deposit amount'
+      });
+
+    }
+
+
+    const amount =
+      Number(
+        amountMatch[1]
+          .replace(/,/g, '')
+      );
+
+
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
+
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid amount'
+      });
+
+    }
+
+
+    // ==================================================
+    // 5. 입금자명 찾기
+    //
+    // 현재 기업은행 문자 구조:
+    //
+    // 입금 10,000원
+    // 잔액 13,607원
+    // 경석느금
+    // 666***58901011
+    // 기업
+    //
+    // 따라서 "잔액" 다음 줄을 입금자명으로 사용
+    // ==================================================
+
+    const balanceIndex =
+      lines.findIndex(
+        (line, index) =>
+          index > depositIndex &&
+          /^잔액\s*/.test(line)
+      );
+
+
+    let donorName = '';
+
+
+    if (
+      balanceIndex !== -1 &&
+      lines[balanceIndex + 1]
+    ) {
+
+      donorName =
+        lines[balanceIndex + 1];
+
+    }
+
+
+    // 혹시 잔액 줄을 못 찾으면
+    // 입금 줄 + 2번째 줄을 fallback으로 사용
+
+    if (!donorName) {
+
+      donorName =
+        lines[depositIndex + 2] || '';
+
+    }
+
+
+    if (!donorName) {
+
+      return res.status(400).json({
+        ok: false,
+        error: 'Donor name not found'
+      });
+
+    }
+
+
+    // ==================================================
+    // 6. 파싱 결과
+    // ==================================================
 
     console.log(
-      '[ACCOUNTGETTER] ❌ 잘못된 금액:',
+      '[ACCOUNTGETTER] ✅ 문자 파싱 완료'
+    );
+
+    console.log(
+      '후원자명:',
+      donorName
+    );
+
+    console.log(
+      '금액:',
       amount
     );
 
-    return res.status(400).json({
-      ok: false,
-      error: 'Invalid amount'
-    });
-  }
 
-
-  try {
-
-    // ======================================================
-    // 4. 유저 조회
-    // ======================================================
-
-    console.log(
-      `[ACCOUNTGETTER] 유저 조회: ${login_id}`
-    );
-
+    // ==================================================
+    // 7. 유저 확인
+    // ==================================================
 
     const {
       data: user,
@@ -535,7 +672,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
     if (userError) {
 
       console.error(
-        '[ACCOUNTGETTER] ❌ 유저 조회 오류:',
+        '[ACCOUNTGETTER] 유저 조회 오류:',
         userError
       );
 
@@ -543,44 +680,33 @@ app.post('/accountgetter/:login_id', async (req, res) => {
         ok: false,
         error: 'User lookup failed'
       });
+
     }
 
 
     if (!user) {
 
-      console.log(
-        `[ACCOUNTGETTER] ❌ 존재하지 않는 유저: ${login_id}`
-      );
-
       return res.status(404).json({
         ok: false,
         error: 'User not found'
       });
+
     }
 
 
-    console.log(
-      '[ACCOUNTGETTER] ✅ 유저 확인:',
-      user
-    );
-
-
     if (user.is_active === false) {
-
-      console.log(
-        `[ACCOUNTGETTER] ❌ 비활성 유저: ${login_id}`
-      );
 
       return res.status(403).json({
         ok: false,
         error: 'User is inactive'
       });
+
     }
 
 
-    // ======================================================
-    // 5. DB에 넣을 최종 데이터
-    // ======================================================
+    // ==================================================
+    // 8. bank_donations 저장
+    // ==================================================
 
     const insertData = {
 
@@ -588,33 +714,26 @@ app.post('/accountgetter/:login_id', async (req, res) => {
         user.id,
 
       donor_name:
-        donor_name.trim(),
+        donorName,
 
       amount:
-        parsedAmount,
+        amount,
 
+      // 계좌후원에는 별도 메시지가 없으므로 비움
       text:
-        typeof text === 'string'
-          ? text.trim()
-          : '',
+        '',
 
       executed:
         false
+
     };
 
 
     console.log(
-      '[ACCOUNTGETTER] DB 저장 예정 데이터:'
-    );
-
-    console.log(
+      '[ACCOUNTGETTER] DB 저장 예정:',
       insertData
     );
 
-
-    // ======================================================
-    // 6. bank_donations INSERT
-    // ======================================================
 
     const {
       data: donation,
@@ -639,7 +758,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
     if (insertError) {
 
       console.error(
-        '[ACCOUNTGETTER] ❌ DB 저장 실패:',
+        '[ACCOUNTGETTER] DB 저장 실패:',
         insertError
       );
 
@@ -647,28 +766,34 @@ app.post('/accountgetter/:login_id', async (req, res) => {
         ok: false,
         error: 'Donation insert failed'
       });
+
     }
 
 
-    // ======================================================
-    // 7. 최종 저장 결과 로그
-    // ======================================================
+    // ==================================================
+    // 9. 성공
+    // ==================================================
 
     console.log('\n----------------------------------------');
     console.log('[ACCOUNTGETTER] ✅ 계좌후원 저장 완료');
-    console.log('DB ID:', donation.id);
-    console.log('user_id:', donation.user_id);
+    console.log('ID:', donation.id);
     console.log('후원자:', donation.donor_name);
     console.log('금액:', donation.amount);
-    console.log('텍스트:', donation.text);
     console.log('executed:', donation.executed);
-    console.log('created_at:', donation.created_at);
     console.log('----------------------------------------\n');
 
 
     return res.status(201).json({
 
       ok: true,
+
+      parsed: {
+        donor_name:
+          donorName,
+
+        amount:
+          amount
+      },
 
       donation
 
@@ -678,7 +803,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
   } catch (error) {
 
     console.error(
-      '[ACCOUNTGETTER] ❌ 예상하지 못한 오류:',
+      '[ACCOUNTGETTER] 예상하지 못한 오류:',
       error
     );
 
@@ -691,9 +816,6 @@ app.post('/accountgetter/:login_id', async (req, res) => {
   }
 
 });
-
-
-
 
 
 
