@@ -4,6 +4,7 @@ import cors from 'cors';
 import express from 'express';
 import ws from 'ws';
 import { createClient } from '@supabase/supabase-js';
+import { registerGoalProgressRoutes } from './goalProgress.js';
 
 const app = express();
 
@@ -43,10 +44,12 @@ function buildDonationAlertText(donorName, donationText) {
   return `${name} ${text}`;
 }
 
-app.use(cors());
+app.use(cors())
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.text({ type: 'text/plain' }));
+
+registerGoalProgressRoutes(app, supabase);
 
 
 // ======================================================
