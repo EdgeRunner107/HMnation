@@ -33,6 +33,16 @@ const supabase = createClient(
   }
 );
 
+// Compose alert text only for next responses; keep stored/list text unchanged.
+function buildDonationAlertText(donorName, donationText) {
+  const name = String(donorName ?? '').trim();
+  const text = String(donationText ?? '').trim();
+
+  if (!name) return text;
+  if (!text || name === text) return name;
+  return `${name} ${text}`;
+}
+
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -273,7 +283,12 @@ app.get('/api/u/:login_id/next', async (req, res) => {
     return res.json({
       ok: true,
       login_id: user.login_id,
-      donation: donation || null
+      donation: donation
+        ? {
+            ...donation,
+            text: buildDonationAlertText(donation.donor_name, donation.text)
+          }
+        : null
     });
   } catch (error) {
     console.error('[USER DONATIONS NEXT] lookup failed:', error);
@@ -721,7 +736,12 @@ app.get('/api/donations/next', async (req, res) => {
       ok: true,
 
       donation:
-        donation || null
+        donation
+          ? {
+              ...donation,
+              text: buildDonationAlertText(donation.donor_name, donation.text)
+            }
+          : null
 
     });
 
@@ -1278,9 +1298,9 @@ app.post('/accountgetter/:login_id', async (req, res) => {
     // donor_name = "경석"
     // text       = "되냐"
     //
-    // "경석느금"
-    // donor_name = "경석느금"
-    // text       = "경석느금"
+    // "안녕하세요" (구분자가 없으면 익명)
+    // donor_name = "익명"
+    // text       = "안녕하세요"
     //
     // "경석/오늘/방송/화이팅"
     // donor_name = "경석"
@@ -1292,7 +1312,7 @@ app.post('/accountgetter/:login_id', async (req, res) => {
     // ==================================================
 
     let donorName =
-      rawDonorText.trim();
+      '익명';
 
     let donationText =
       rawDonorText.trim();
