@@ -211,7 +211,7 @@ app.get(['/api/u', '/api/u/:login_id'], async (req, res) => {
 
     const { data: donations, error: donationsError } = await supabase
       .from('bank_donations')
-      .select('id, user_id, donor_name, amount, text, executed, created_at, executed_at')
+      .select('id, user_id, donor_name, amount, text, executed, canceled, created_at, executed_at')
       .eq('user_id', user.id)
       .order('created_at', { ascending: false });
 
@@ -260,6 +260,7 @@ app.get('/api/u/:login_id/next', async (req, res) => {
       .select('id, donor_name, amount, text, created_at')
       .eq('user_id', user.id)
       .eq('executed', false)
+      .eq('canceled', false)
       .order('created_at', { ascending: true })
       .limit(1)
       .maybeSingle();
@@ -278,6 +279,82 @@ app.get('/api/u/:login_id/next', async (req, res) => {
     console.error('[USER DONATIONS NEXT] lookup failed:', error);
     return res.status(500).json({ ok: false, error: 'Internal server error' });
   }
+});
+
+
+// ======================================================
+// Retry / cancel only donations owned by the URL user
+// ======================================================
+
+async function updateUserDonation(req, res, values) {
+  const { login_id, id } = req.params;
+  const donationId = Number(id);
+
+  if (!login_id || !login_id.trim()) {
+    return res.status(400).json({ ok: false, error: 'login_id is required' });
+  }
+  if (!Number.isSafeInteger(donationId) || donationId <= 0) {
+    return res.status(400).json({ ok: false, error: 'Invalid donation id' });
+  }
+
+  try {
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id, login_id, is_active')
+      .eq('login_id', login_id)
+      .maybeSingle();
+
+    if (userError) throw userError;
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    if (user.is_active === false) {
+      return res.status(403).json({ ok: false, error: 'User is inactive' });
+    }
+
+    const { data: donation, error: lookupError } = await supabase
+      .from('bank_donations')
+      .select('id')
+      .eq('id', donationId)
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (lookupError) throw lookupError;
+    if (!donation) {
+      return res.status(404).json({ ok: false, error: 'Donation not found' });
+    }
+
+    // Keep the ownership condition on the write as well as the lookup.
+    const { data: updatedDonation, error: updateError } = await supabase
+      .from('bank_donations')
+      .update(values)
+      .eq('id', donationId)
+      .eq('user_id', user.id)
+      .select('id, user_id, donor_name, amount, text, executed, canceled, created_at, executed_at')
+      .maybeSingle();
+
+    if (updateError) throw updateError;
+    if (!updatedDonation) {
+      return res.status(404).json({ ok: false, error: 'Donation not found' });
+    }
+
+    return res.json({ ok: true, donation: updatedDonation });
+  } catch (error) {
+    console.error('[USER DONATION UPDATE] failed:', error);
+    return res.status(500).json({ ok: false, error: 'Donation update failed' });
+  }
+}
+
+app.post('/api/u/:login_id/donations/:id/retry', (req, res) => {
+  return updateUserDonation(req, res, {
+    executed: false,
+    executed_at: null,
+    canceled: false
+  });
+});
+
+app.post('/api/u/:login_id/donations/:id/cancel', (req, res) => {
+  return updateUserDonation(req, res, { canceled: true });
 });
 
 
@@ -466,6 +543,7 @@ app.get('/api/donations', async (req, res) => {
         amount,
         text,
         executed,
+        canceled,
         created_at,
         executed_at
       `)
@@ -594,7 +672,7 @@ app.get('/api/donations/next', async (req, res) => {
 
 
     // --------------------------------------------------
-    // 해당 유저의 executed=false 데이터 중
+    // 해당 유저의 executed=false AND canceled=false 데이터 중
     // 가장 오래된 1건 조회
     // --------------------------------------------------
 
@@ -612,6 +690,7 @@ app.get('/api/donations/next', async (req, res) => {
       `)
       .eq('user_id', user.id)
       .eq('executed', false)
+      .eq('canceled', false)
       .order(
         'created_at',
         {
@@ -715,6 +794,7 @@ app.post('/api/donations/:id/complete', async (req, res) => {
         amount,
         text,
         executed,
+        canceled,
         executed_at
       `)
       .eq('id', donationId)
@@ -747,6 +827,18 @@ app.post('/api/donations/:id/complete', async (req, res) => {
         error: 'Donation not found'
       });
 
+    }
+
+
+    // --------------------------------------------------
+    // 취소된 후원은 완료 처리하지 않음
+    // --------------------------------------------------
+
+    if (donation.canceled === true) {
+      return res.status(409).json({
+        ok: false,
+        error: 'Canceled donation cannot be completed'
+      });
     }
 
 
@@ -800,6 +892,7 @@ app.post('/api/donations/:id/complete', async (req, res) => {
       })
       .eq('id', donationId)
       .eq('executed', false)
+      .eq('canceled', false)
       .select(`
         id,
         donor_name,
