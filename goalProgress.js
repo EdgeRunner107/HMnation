@@ -1,7 +1,7 @@
 const MAX_AMOUNT = Number.MAX_SAFE_INTEGER;
 const TOONATION_STALE_AFTER_MS = 60_000;
 
-function readStoredAmount(value) {
+export function readStoredAmount(value) {
   if (
     typeof value !== 'number' &&
     (typeof value !== 'string' || !/^\d+$/.test(value))

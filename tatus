@@ -1,0 +1,245 @@
+warning: in the working copy of 'goalProgress.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'server.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/donations.test.js', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/goalProgress.js b/goalProgress.js[m
+[1mindex 647bdb9..094433a 100644[m
+[1m--- a/goalProgress.js[m
+[1m+++ b/goalProgress.js[m
+[36m@@ -1,7 +1,7 @@[m
+ const MAX_AMOUNT = Number.MAX_SAFE_INTEGER;[m
+ const TOONATION_STALE_AFTER_MS = 60_000;[m
+ [m
+[31m-function readStoredAmount(value) {[m
+[32m+[m[32mexport function readStoredAmount(value) {[m
+   if ([m
+     typeof value !== 'number' &&[m
+     (typeof value !== 'string' || !/^\d+$/.test(value))[m
+[1mdiff --git a/server.js b/server.js[m
+[1mindex 2f5a223..69f2f21 100644[m
+[1m--- a/server.js[m
+[1m+++ b/server.js[m
+[36m@@ -5,6 +5,7 @@[m [mimport express from 'express';[m
+ import ws from 'ws';[m
+ import { createClient } from '@supabase/supabase-js';[m
+ import { registerGoalProgressRoutes } from './goalProgress.js';[m
+[32m+[m[32mimport { registerUserGoalProgressRoutes } from './userGoalProgress.js';[m
+ [m
+ const app = express();[m
+ [m
+[36m@@ -50,6 +51,7 @@[m [mapp.use(express.urlencoded({ extended: true }));[m
+ app.use(express.text({ type: 'text/plain' }));[m
+ [m
+ registerGoalProgressRoutes(app, supabase);[m
+[32m+[m[32mregisterUserGoalProgressRoutes(app, supabase);[m
+ [m
+ [m
+ // ======================================================[m
+[1mdiff --git a/tests/donations.test.js b/tests/donations.test.js[m
+[1mindex be9f255..9765378 100644[m
+[1m--- a/tests/donations.test.js[m
+[1m+++ b/tests/donations.test.js[m
+[36m@@ -15,6 +15,8 @@[m [mlet beforeWrite;[m
+ let rankingResult;[m
+ let goalDbTotal;[m
+ let toonGoalState;[m
+[32m+[m[32mlet userGoalDbTotals;[m
+[32m+[m[32mlet userToonGoalStates;[m
+ [m
+ function seed() {[m
+   users = [[m
+[36m@@ -80,6 +82,8 @@[m [mfunction seed() {[m
+   rankingResult = [];[m
+   goalDbTotal = "50000";[m
+   toonGoalState = null;[m
+[32m+[m[32m  userGoalDbTotals = new Map([["1", "50000"], ["2", "9000"]]);[m
+[32m+[m[32m  userToonGoalStates = new Map();[m
+ }[m
+ [m
+ before(async () => {[m
+[36m@@ -104,6 +108,23 @@[m [mbefore(async () => {[m
+     if (req.path === "/rpc/get_donation_db_total") {[m
+       return res.json(goalDbTotal);[m
+     }[m
+[32m+[m[32m    if (req.path === "/rpc/get_user_donation_db_total") {[m
+[32m+[m[32m      assert.equal(typeof req.body.p_user_id, "string");[m
+[32m+[m[32m      return res.json(userGoalDbTotals.get(req.body.p_user_id) ?? "0");[m
+[32m+[m[32m    }[m
+[32m+[m[32m    if (req.path === "/user_toonation_goal_state") {[m
+[32m+[m[32m      if (req.method === "POST") {[m
+[32m+[m[32m        assert.equal(req.query.on_conflict, "user_id");[m
+[32m+[m[32m        assert.ok(req.headers.prefer.includes("resolution=merge-duplicates"));[m
+[32m+[m[32m        const snapshot = { ...req.body };[m
+[32m+[m[32m        userToonGoalStates.set(String(snapshot.user_id), snapshot);[m
+[32m+[m[32m        return res.json(snapshot);[m
+[32m+[m[32m      }[m
+[32m+[m[32m      assert.equal(req.method, "GET");[m
+[32m+[m[32m      assert.ok(req.query.user_id.startsWith("eq."));[m
+[32m+[m[32m      const snapshot = userToonGoalStates.get(req.query.user_id.slice(3));[m
+[32m+[m[32m      return res.json(snapshot ? [snapshot] : []);[m
+[32m+[m[32m    }[m
+     if (req.path === "/toonation_goal_state") {[m
+       if (req.method === "POST") {[m
+         assert.equal(req.query.on_conflict, "id");[m
+[36m@@ -698,3 +719,162 @@[m [mtest("goal: corrupt and unsafe stored totals fail without rounding or zeroing th[m
+   toonGoalState = { id: 1, amount: 1, updated_at: new Date().toISOString() };[m
+   assert.equal((await request("/api/goal-progress")).status, 500);[m
+ });[m
+[32m+[m
+[32m+[m[32mconst userGoalUrl = (loginId = "testuser") =>[m
+[32m+[m[32m  `/api/u/${encodeURIComponent(loginId)}/goal-progress`;[m
+[32m+[m
+[32m+[m[32masync function postUserGoal(loginId, amount, token = "collector-test-token", extra = {}) {[m
+[32m+[m[32m  const response = await fetch(apiBase + `/api/u/${encodeURIComponent(loginId)}/toonation-goal`, {[m
+[32m+[m[32m    method: "POST",[m
+[32m+[m[32m    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },[m
+[32m+[m[32m    body: JSON.stringify({ amount, ...extra }),[m
+[32m+[m[32m  });[m
+[32m+[m[32m  return { status: response.status, data: await response.json() };[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mtest("personal graph: separates both sources by URL user and never reads the global snapshot", async (context) => {[m
+[32m+[m[32m  configureGoalToken(context);[m
+[32m+[m[32m  toonGoalState = { id: 1, amount: 999999, updated_at: new Date().toISOString() };[m
+[32m+[m[32m  assert.equal((await postUserGoal("testuser", 11900)).status, 200);[m
+[32m+[m[32m  assert.equal((await postUserGoal("SA58PARA", 25000)).status, 200);[m
+[32m+[m[32m  for (const [loginId, dbAmount, toonAmount] of [[m
+[32m+[m[32m    ["testuser", 50000, 11900], ["SA58PARA", 9000, 25000],[m
+[32m+[m[32m  ]) {[m
+[32m+[m[32m    const response = await fetch(apiBase + userGoalUrl(loginId));[m
+[32m+[m[32m    assert.equal(response.status, 200);[m
+[32m+[m[32m    assert.equal(response.headers.get("cache-control"), "no-store");[m
+[32m+[m[32m    const result = await response.json();[m
+[32m+[m[32m    assert.equal(result.login_id, loginId);[m
+[32m+[m[32m    assert.equal(result.dbAmount, dbAmount);[m
+[32m+[m[32m    assert.equal(result.toonAmount, toonAmount);[m
+[32m+[m[32m    assert.equal(result.totalAmount, dbAmount + toonAmount);[m
+[32m+[m[32m    assert.equal(result.isToonStale, false);[m
+[32m+[m[32m  }[m
+[32m+[m[32m  assert.ok(calls.every((call) => ![[m
+[32m+[m[32m    "/rpc/get_donation_db_total", "/toonation_goal_state", "/bank_donations",[m
+[32m+[m[32m  ].includes(call.path)));[m
+[32m+[m[32m});[m
+[32m+[m
+[32m+[m[32mtest("personal graph: repeated/decreasing snapshots replace only the URL user's amount", async (context) => {[m
+[32m+[m[32m  configureGoalToken(context);[m
+[32m+[m[32m  const originalDonations = structuredClone(donations);[m
+[32m+[m[32m  await postUserGoal("SA58PARA", 25000);[m
+[32m+[m[32m  const otherSnapshot = structuredClone(userToonGoalStates.get("2"));[m
+[32m+[m[32m  for (const amount of [11900, 11900, 21900, 7000, 0]) {[m
+[32m+[m[32m    // Body IDs cannot redirect the write away from the URL user.[m
+[32m+[m[32m    const updated = await postUserGoal("testuser", amount, undefined, {[m
+[32m+[m[32m      user_id: 2, login_id: "SA58PARA",[m
+[32m+[m[32m    });[m
+[32m+[m[32m    assert.equal(updated.status, 200);[m
+[32m+[m[32m    assert.equal(updated.data.login_id, "testuser");[m
+[32m+[m[32m    for (let poll = 0; poll < 2; poll += 1) {[m
+[32m+[m[32m      const { data } = await request(userGoalUrl());[m
+[32m+[m[32m      assert.equal(data.totalAmount, 50000 + amount);[m
+[32m+[m[32m    }[m
+[32m+[m[32m    assert.deepEqual(userToonGoalStates.get("2"), otherSnapshot);[m
+[32m+[m[32m  }[m
+[32m+[m[32m  assert.deepEqual(donations, originalDonations);[m
+[32m+[m[32m  assert.equal(toonGoalState, null);[m
+[32m+[m[32m});[m
+[32m+[m
+[32m+[m[32mtest("personal graph: no snapshot starts at zero and stale data keeps its amount", async () => {[m
+[32m+[m[32m  const initial = await request(userGoalUrl());[m
+[32m+[m[32m  assert.equal(initial.status, 200);[m
+[32m+[m[32m  assert.equal(initial.data.toonAmount, 0);[m
+[32m+[m[32m  assert.equal(initial.data.totalAmount, 50000);[m
+[32m+[m[32m  assert.equal(initial.data.toonUpdatedAt, null);[m
+[32m+[m[32m  assert.equal(initial.data.isToonStale, true);[m
+[32m+[m[32m  userToonGoalStates.set("1", { amount: "11900", updated_at: "2000-01-01T00:00:00Z" });[m
+[32m+[m[32m  const stale = await request(userGoalUrl());[m
+[32m+[m[32m  assert.equal(stale.data.totalAmount, 61900);[m
+[32m+[m[32m  assert.equal(stale.data.isToonStale, true);[m
+[32m+[m[32m});[m
+[32m+[m
+[32m+[m[32mtest("personal graph: missing/inactive/blank users never access amount data", async (context) => {[m
+[32m+[m[32m  configureGoalToken(context);[m
+[32m+[m[32m  for (const [loginId, status] of [["missing", 404], ["inactive", 403], [" ", 400]]) {[m
+[32m+[m[32m    calls = [];[m
+[32m+[m[32m    assert.equal((await request(userGoalUrl(loginId))).status, status);[m
+[32m+[m[32m    assert.equal((await postUserGoal(loginId, 100)).status, status);[m
+[32m+[m[32m    assert.ok(calls.every((call) => call.path === "/users"));[m
+[32m+[m[32m  }[m
+[32m+[m[32m  failRequest = (call) => call.path === "/users";[m
+[32m+[m[32m  assert.equal((await request(userGoalUrl())).status, 500);[m
+[32m+[m[32m  assert.equal((await postUserGoal("testuser", 100)).status, 500);[m
+[32m+[m[32m  assert.equal(userToonGoalStates.size, 0);[m
+[32m+[m[32m});[m
+[32m+[m
+[32m+[m[32mtest("personal graph: preserves collector authentication and validates writes before database access", async (context) => {[m
+[32m+[m[32m  configureGoalToken(context);[m
+[32m+[m[32m  assert.equal((await postUserGoal("testuser", 100, "wrong")).status, 401);[m
+[32m+[m[32m  for (const amount of [-1, 1.1, "11900", null, {}, [], Number.MAX_SAFE_INTEGER + 1]) {[m
+[32m+[m[32m    assert.equal((await postUserGoal("testuser", amount)).status, 400);[m
+[32m+[m[32m  }[m
+[32m+[m[32m  delete process.env.TOONATION_GOAL_TOKEN;[m
+[32m+[m[32m  assert.equal((await postUserGoal("testuser", 100)).status, 503);[m
+[32m+[m[32m  assert.equal(calls.length, 0);[m
+[32m+[m[32m});[m
+[32m+[m
+[32m+[m[32mtest("personal graph: supports encoded login IDs and actual string user IDs", async (context) => {[m
+[32m+[m[32m  configureGoalToken(context);[m
+[32m+[m[32m  const id = "8686e010-68ba-499b-80a1-a3e8b7f8c845";[m
+[32m+[m[32m  const loginId = "방송+one/%";[m
+[32m+[m[32m  users.push({ id, login_id: loginId, is_active: true });[m
+[32m+[m[32m  userGoalDbTotals.set(id, "35000");[m
+[32m+[m[32m  assert.equal((await postUserGoal(loginId, 11900)).status, 200);[m
+[32m+[m[32m  const result = await request(userGoalUrl(loginId));[m
+[32m+[m[32m  assert.equal(result.status, 200);[m
+[32m+[m[32m  assert.equal(result.data.login_id, loginId);[m
+[32m+[m[32m  assert.equal(result.data.totalAmount, 46900);[m
+[32m+[m[32m  assert.equal(userToonGoalStates.get(id).user_id, id);[m
+[32m+[m[32m});[m
+[32m+[m
+[32m+[m[32mtest("personal graph: goal boundaries and percentage follow the current personal total", async () => {[m
+[32m+[m[32m  for (const [amount, goal, percent] of [[m
+[32m+[m[32m    [0, 100000, 0], [100000, 100000, 100], [100001, 1000000, 10],[m
+[32m+[m[32m    [1000000, 1000000, 100], [1000001, 2000000, 50],[m
+[32m+[m[32m    [1500000, 2000000, 75], [10500000, 10000000, 105],[m
+[32m+[m[32m  ]) {[m
+[32m+[m[32m    userGoalDbTotals.set("1", String(amount));[m
+[32m+[m[32m    const result = await request(userGoalUrl());[m
+[32m+[m[32m    assert.equal(result.status, 200);[m
+[32m+[m[32m    assert.equal(result.data.totalAmount, amount);[m
+[32m+[m[32m    assert.equal(result.data.goalAmount, goal);[m
+[32m+[m[32m    assert.equal(result.data.percent, percent);[m
+[32m+[m[32m  }[m
+[32m+[m[32m});[m
+[32m+[m
+[32m+[m[32mtest("personal graph: read failures and invalid stored values return errors, never a zero fallback", async () => {[m
+[32m+[m[32m  for (const path of ["/rpc/get_user_donation_db_total", "/user_toonation_goal_state"]) {[m
+[32m+[m[32m    failRequest = (call) => call.path === path;[m
+[32m+[m[32m    const result = await request(userGoalUrl());[m
+[32m+[m[32m    assert.equal(result.status, 500);[m
+[32m+[m[32m    assert.equal(result.data.totalAmount, undefined);[m
+[32m+[m[32m  }[m
+[32m+[m[32m  failRequest = null;[m
+[32m+[m[32m  for (const value of ["not-an-amount", "9007199254740992", -1, [50000]]) {[m
+[32m+[m[32m    userGoalDbTotals.set("1", value);[m
+[32m+[m[32m    assert.equal((await request(userGoalUrl())).status, 500);[m
+[32m+[m[32m  }[m
+[32m+[m[32m  userGoalDbTotals.set("1", "50000");[m
+[32m+[m[32m  for (const snapshot of [[m
+[32m+[m[32m    { amount: null, updated_at: new Date().toISOString() },[m
+[32m+[m[32m    { amount: 11900, updated_at: null },[m
+[32m+[m[32m    { amount: 11900, updated_at: "invalid" },[m
+[32m+[m[32m  ]) {[m
+[32m+[m[32m    userToonGoalStates.set("1", snapshot);[m
+[32m+[m[32m    assert.equal((await request(userGoalUrl())).status, 500);[m
+[32m+[m[32m  }[m
+[32m+[m[32m  userGoalDbTotals.set("1", String(Number.MAX_SAFE_INTEGER));[m
+[32m+[m[32m  userToonGoalStates.set("1", { amount: 1, updated_at: new Date().toISOString() });[m
+[32m+[m[32m  assert.equal((await request(userGoalUrl())).status, 500);[m
+[32m+[m[32m});[m
+[32m+[m
+[32m+[m[32mtest("personal graph: a failed write retains the user's previous snapshot", async (context) => {[m
+[32m+[m[32m  configureGoalToken(context);[m
+[32m+[m[32m  await postUserGoal("testuser", 11900);[m
+[32m+[m[32m  const before = structuredClone(userToonGoalStates.get("1"));[m
+[32m+[m[32m  failRequest = (call) => call.path === "/user_toonation_goal_state" && call.method === "POST";[m
+[32m+[m[32m  assert.equal((await postUserGoal("testuser", 21900)).status, 500);[m
+[32m+[m[32m  assert.deepEqual(userToonGoalStates.get("1"), before);[m
+[32m+[m[32m});[m
