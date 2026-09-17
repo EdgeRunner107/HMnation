@@ -99,8 +99,15 @@ before(async () => {
       body: req.body,
     };
     calls.push(call);
-    if (failRequest?.(call)) {
-      return res.status(500).json({ message: "Test database failure" });
+    const failure = failRequest?.(call);
+    if (failure) {
+      return res
+        .status(typeof failure === "object" ? failure.status ?? 500 : 500)
+        .json(
+          typeof failure === "object"
+            ? failure.body ?? { message: "Test database failure" }
+            : { message: "Test database failure" },
+        );
     }
     if (req.path === "/rpc/get_current_donation_ranking") {
       return res.json(rankingResult);
@@ -788,6 +795,58 @@ test("personal graph: no snapshot starts at zero and stale data keeps its amount
   const stale = await request(userGoalUrl());
   assert.equal(stale.data.totalAmount, 61900);
   assert.equal(stale.data.isToonStale, true);
+});
+
+test("personal graph: missing optional migration falls back to Ranking and zero Toonation", async () => {
+  rankingResult = [
+    { donor_name: "A", total_amount: "10000" },
+    { donor_name: "B", total_amount: "25000" },
+  ];
+  failRequest = (call) => {
+    if (call.path === "/rpc/get_user_donation_db_total") {
+      return {
+        status: 404,
+        body: { code: "PGRST202", message: "Function not found" },
+      };
+    }
+    if (call.path === "/user_toonation_goal_state") {
+      return {
+        status: 404,
+        body: { code: "PGRST205", message: "Table not found" },
+      };
+    }
+    return false;
+  };
+
+  const result = await request(userGoalUrl());
+  assert.equal(result.status, 200);
+  assert.deepEqual(
+    {
+      login_id: result.data.login_id,
+      dbAmount: result.data.dbAmount,
+      toonAmount: result.data.toonAmount,
+      totalAmount: result.data.totalAmount,
+      goalAmount: result.data.goalAmount,
+      percent: result.data.percent,
+      toonUpdatedAt: result.data.toonUpdatedAt,
+      isToonStale: result.data.isToonStale,
+    },
+    {
+      login_id: "testuser",
+      dbAmount: 35000,
+      toonAmount: 0,
+      totalAmount: 35000,
+      goalAmount: 100000,
+      percent: 35,
+      toonUpdatedAt: null,
+      isToonStale: true,
+    },
+  );
+  const fallback = calls.find(
+    (call) => call.path === "/rpc/get_current_donation_ranking",
+  );
+  assert.equal(fallback.body.p_user_id, 1);
+  assert.equal(fallback.body.p_limit, 2_147_483_647);
 });
 
 test("personal graph: missing/inactive/blank users never access amount data", async (context) => {

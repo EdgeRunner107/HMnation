@@ -1,6 +1,59 @@
 import { calculateGoal, readStoredAmount } from './goalProgress.js';
 
 const TOONATION_STALE_AFTER_MS = 60_000;
+const ALL_RANKS_LIMIT = 2_147_483_647;
+
+function isMissingSchemaObject(error, postgrestCode, postgresCode) {
+  return error?.code === postgrestCode || error?.code === postgresCode;
+}
+
+async function getUserDonationDbTotal(supabase, userId) {
+  const aggregate = await supabase.rpc('get_user_donation_db_total', {
+    p_user_id: String(userId),
+  });
+  if (!aggregate.error) return readStoredAmount(aggregate.data);
+  if (!isMissingSchemaObject(aggregate.error, 'PGRST202', '42883')) {
+    throw aggregate.error;
+  }
+
+  // Deployments that have not run user-goal-progress.sql can still use the
+  // same per-user source as the working Ranking endpoint.
+  const { data: ranking, error } = await supabase.rpc(
+    'get_current_donation_ranking',
+    { p_user_id: userId, p_limit: ALL_RANKS_LIMIT },
+  );
+  if (error) throw error;
+  if (!Array.isArray(ranking)) {
+    throw new Error('Invalid user ranking result');
+  }
+
+  return ranking.reduce((total, row) => {
+    const amount = readStoredAmount(row?.total_amount);
+    if (total > Number.MAX_SAFE_INTEGER - amount) {
+      throw new Error('Invalid stored goal amount');
+    }
+    return total + amount;
+  }, 0);
+}
+
+async function getUserToonationState(supabase, userId) {
+  const result = await supabase
+    .from('user_toonation_goal_state')
+    .select('amount, updated_at')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (
+    result.error &&
+    isMissingSchemaObject(result.error, 'PGRST205', '42P01')
+  ) {
+    // No personal Toonation storage has been installed yet. This is the same
+    // observable state as a valid user who has never submitted a snapshot.
+    return null;
+  }
+  if (result.error) throw result.error;
+  return result.data;
+}
 
 // Match the existing /api/u/:login_id/... lookup and active-user checks.
 async function findUser(supabase, loginId, res) {
@@ -26,22 +79,14 @@ async function findUser(supabase, loginId, res) {
 }
 
 export async function getUserGoalProgress(supabase, userId, now = Date.now()) {
-  const [dbResult, toonResult] = await Promise.all([
-    // Aggregate the complete existing ranking in SQL, without REST top-N limits.
-    supabase.rpc('get_user_donation_db_total', { p_user_id: String(userId) }),
-    supabase
-      .from('user_toonation_goal_state')
-      .select('amount, updated_at')
-      .eq('user_id', userId)
-      .maybeSingle(),
+  const [dbAmount, toonState] = await Promise.all([
+    getUserDonationDbTotal(supabase, userId),
+    getUserToonationState(supabase, userId),
   ]);
-  if (dbResult.error) throw dbResult.error;
-  if (toonResult.error) throw toonResult.error;
 
-  const dbAmount = readStoredAmount(dbResult.data);
-  const toonAmount = toonResult.data ? readStoredAmount(toonResult.data.amount) : 0;
-  const toonUpdatedAt = toonResult.data?.updated_at ?? null;
-  if (toonResult.data && !Number.isFinite(Date.parse(toonUpdatedAt))) {
+  const toonAmount = toonState ? readStoredAmount(toonState.amount) : 0;
+  const toonUpdatedAt = toonState?.updated_at ?? null;
+  if (toonState && !Number.isFinite(Date.parse(toonUpdatedAt))) {
     throw new Error('Invalid Toonation update timestamp');
   }
   // Always recompute from the two current sources; never add to a prior total.
