@@ -17,6 +17,7 @@ let goalDbTotal;
 let toonGoalState;
 let userGoalDbTotals;
 let userToonGoalStates;
+let userGraphSettings;
 
 function seed() {
   users = [
@@ -84,6 +85,7 @@ function seed() {
   toonGoalState = null;
   userGoalDbTotals = new Map([["1", "50000"], ["2", "9000"]]);
   userToonGoalStates = new Map();
+  userGraphSettings = [];
 }
 
 before(async () => {
@@ -144,17 +146,28 @@ before(async () => {
       assert.equal(req.query.id, "eq.1");
       return res.json(toonGoalState ? [toonGoalState] : []);
     }
-    const rows = req.path === "/users" ? users : donations;
+    const rows = req.path === "/users"
+      ? users
+      : req.path === "/user_graph_settings"
+        ? userGraphSettings
+        : donations;
     if (req.method === "PATCH") beforeWrite?.(call);
     let selected = rows.filter((row) =>
       Object.entries(req.query).every(([key, value]) => {
-        if (["select", "order", "limit"].includes(key)) return true;
+        if (["select", "order", "limit", "on_conflict"].includes(key)) return true;
         assert.ok(value.startsWith("eq."), `Unexpected filter: ${value}`);
         return String(row[key]) === value.slice(3);
       }),
     );
     if (req.method === "PATCH") {
       selected.forEach((row) => Object.assign(row, req.body));
+    } else if (req.method === "POST" && req.path === "/user_graph_settings") {
+      assert.equal(req.query.on_conflict, "login_id");
+      assert.ok(req.headers.prefer.includes("resolution=merge-duplicates"));
+      const existing = rows.find((row) => row.login_id === req.body.login_id);
+      if (existing) Object.assign(existing, req.body);
+      else rows.push({ id: 700 + rows.length, ...req.body });
+      selected = [rows.find((row) => row.login_id === req.body.login_id)];
     } else if (req.method === "POST") {
       const inserted = {
         id: 300 + donations.length,
@@ -822,6 +835,104 @@ test("goal: corrupt and unsafe stored totals fail without rounding or zeroing th
 
 const userGoalUrl = (loginId = "testuser") =>
   `/api/u/${encodeURIComponent(loginId)}/goal-progress`;
+const graphSettingsUrl = (loginId = "testuser") =>
+  `/api/u/${encodeURIComponent(loginId)}/graph-settings`;
+
+async function putGraphSettings(loginId, settings) {
+  return request(graphSettingsUrl(loginId), "PUT", settings);
+}
+
+test("graph settings: a valid user without a row receives stable defaults", async () => {
+  const result = await request(graphSettingsUrl());
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.data, {
+    ok: true,
+    login_id: "testuser",
+    label: "후원목표",
+    color: "#3B82F6",
+    isDefault: true,
+  });
+  assert.equal(userGraphSettings.length, 0);
+});
+
+test("graph settings: PUT trims and normalizes, then GET returns each user's row", async () => {
+  const first = await putGraphSettings("testuser", {
+    label: "  경석이 모금액  ",
+    color: "#31d663",
+  });
+  assert.equal(first.status, 200);
+  assert.deepEqual(first.data, {
+    ok: true,
+    login_id: "testuser",
+    label: "경석이 모금액",
+    color: "#31D663",
+    isDefault: false,
+  });
+  assert.equal(
+    (await putGraphSettings("SA58PARA", {
+      label: "유나 목표",
+      color: "#ff5fa2",
+    })).status,
+    200,
+  );
+
+  const [testuser, other] = await Promise.all([
+    request(graphSettingsUrl("testuser")),
+    request(graphSettingsUrl("SA58PARA")),
+  ]);
+  assert.deepEqual(
+    [testuser.data.label, testuser.data.color, testuser.data.isDefault],
+    ["경석이 모금액", "#31D663", false],
+  );
+  assert.deepEqual(
+    [other.data.label, other.data.color, other.data.isDefault],
+    ["유나 목표", "#FF5FA2", false],
+  );
+});
+
+test("graph settings: PUT rejects invalid labels and colors before database access", async () => {
+  for (const settings of [
+    { label: "", color: "#3B82F6" },
+    { label: "   ", color: "#3B82F6" },
+    { label: "가".repeat(21), color: "#3B82F6" },
+    { label: "후원목표", color: "blue" },
+    { label: "후원목표", color: "#FFF" },
+    { label: "후원목표", color: "#12GG00" },
+    { label: null, color: "#3B82F6" },
+  ]) {
+    calls = [];
+    const result = await putGraphSettings("testuser", settings);
+    assert.equal(result.status, 400);
+    assert.equal(result.data.error, "Invalid graph settings");
+    assert.equal(calls.length, 0);
+  }
+});
+
+test("graph settings: user validation and database failures do not write settings", async () => {
+  for (const [loginId, status] of [["missing", 404], ["inactive", 403], [" ", 400]]) {
+    calls = [];
+    assert.equal((await request(graphSettingsUrl(loginId))).status, status);
+    assert.equal(
+      (await putGraphSettings(loginId, {
+        label: "후원목표",
+        color: "#3B82F6",
+      })).status,
+      status,
+    );
+    assert.ok(calls.every((call) => call.path === "/users"));
+  }
+
+  failRequest = (call) => call.path === "/user_graph_settings";
+  assert.equal((await request(graphSettingsUrl())).status, 500);
+  assert.equal(
+    (await putGraphSettings("testuser", {
+      label: "후원목표",
+      color: "#3B82F6",
+    })).status,
+    500,
+  );
+  assert.equal(userGraphSettings.length, 0);
+});
 
 async function postUserGoal(loginId, amount, token = "collector-test-token", extra = {}) {
   const response = await fetch(apiBase + `/api/u/${encodeURIComponent(loginId)}/toonation-goal`, {

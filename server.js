@@ -6,6 +6,7 @@ import ws from 'ws';
 import { createClient } from '@supabase/supabase-js';
 import { registerGoalProgressRoutes } from './goalProgress.js';
 import { registerUserGoalProgressRoutes } from './userGoalProgress.js';
+import { registerUserGraphSettingsRoutes } from './userGraphSettings.js';
 
 const app = express();
 
@@ -109,6 +110,7 @@ app.use(express.text({ type: 'text/plain' }));
 
 registerGoalProgressRoutes(app, supabase);
 registerUserGoalProgressRoutes(app, supabase);
+registerUserGraphSettingsRoutes(app, supabase);
 
 
 // ======================================================

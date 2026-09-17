@@ -56,7 +56,7 @@ async function getUserToonationState(supabase, userId) {
 }
 
 // Match the existing /api/u/:login_id/... lookup and active-user checks.
-async function findUser(supabase, loginId, res) {
+export async function findUser(supabase, loginId, res) {
   if (!loginId || !loginId.trim()) {
     res.status(400).json({ ok: false, error: 'login_id is required' });
     return null;
