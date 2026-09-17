@@ -242,6 +242,8 @@ async function request(path, method = "GET", body, headers) {
 
 const actionUrl = (id, action, loginId = "testuser") =>
   `/api/u/${loginId}/donations/${id}/${action}`;
+const manualUrl = (loginId = "testuser") =>
+  `/api/u/${loginId}/manual-donations`;
 const nextUrls = [
   "/api/u/testuser/next",
   "/api/donations/next?login_id=testuser",
@@ -284,6 +286,97 @@ test("retry clears execution, both next APIs return the oldest eligible row, com
     true,
   );
   assert.equal(donations.length, 4);
+});
+
+test("manual pending is persisted but held until run, then uses the existing next/complete flow", async () => {
+  donations[1].executed = true;
+  const clickedAt = new Date().toISOString();
+  const created = await request(manualUrl(), "POST", {
+    nickname: "  홍길동  ",
+    amount: 50000,
+    message: "  화이팅  ",
+    executionStatus: "pending",
+    clickedAt,
+  });
+
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.data.donation, {
+    id: 304,
+    user_id: 1,
+    donor_name: "홍길동",
+    amount: 50000,
+    text: "화이팅",
+    executed: true,
+    canceled: false,
+    created_at: clickedAt,
+    executed_at: null,
+  });
+  for (const path of nextUrls) {
+    assert.equal((await request(path)).data.donation, null);
+  }
+
+  const run = await request(actionUrl(304, "run"), "POST");
+  assert.equal(run.status, 200);
+  assert.equal(run.data.donation.executed, false);
+  for (const path of nextUrls) {
+    assert.equal((await request(path)).data.donation.id, 304);
+  }
+
+  const completed = await request("/api/donations/304/complete", "POST");
+  assert.equal(completed.status, 200);
+  assert.equal(completed.data.donation.executed, true);
+});
+
+test("manual completed and anonymous records do not auto-run and remain replayable", async () => {
+  donations[1].executed = true;
+  const clickedAt = new Date().toISOString();
+  const created = await request(manualUrl(), "POST", {
+    nickname: "   ",
+    amount: 30000,
+    message: "이미 실행함",
+    executionStatus: "completed",
+    clickedAt,
+  });
+
+  assert.equal(created.status, 201);
+  assert.equal(created.data.donation.donor_name, "익명");
+  assert.equal(created.data.donation.executed, true);
+  assert.equal(created.data.donation.executed_at, clickedAt);
+  for (const path of nextUrls) {
+    assert.equal((await request(path)).data.donation, null);
+  }
+
+  const replay = await request(actionUrl(created.data.donation.id, "retry"), "POST");
+  assert.equal(replay.status, 200);
+  assert.equal(replay.data.donation.executed, false);
+  assert.equal((await request(nextUrls[0])).data.donation.id, created.data.donation.id);
+});
+
+test("manual creation validates ownership, input and click time without inserting", async () => {
+  const valid = {
+    nickname: "테스트",
+    amount: 10000,
+    message: "메시지",
+    executionStatus: "pending",
+    clickedAt: new Date().toISOString(),
+  };
+  const original = structuredClone(donations);
+
+  assert.equal((await request(manualUrl("missing"), "POST", valid)).status, 404);
+  assert.equal((await request(manualUrl("inactive"), "POST", valid)).status, 403);
+  for (const body of [
+    { ...valid, amount: 0 },
+    { ...valid, amount: -1 },
+    { ...valid, amount: 1.5 },
+    { ...valid, amount: "10000" },
+    { ...valid, executionStatus: "invalid" },
+    { ...valid, clickedAt: "invalid" },
+    { ...valid, clickedAt: new Date().toUTCString() },
+    { ...valid, clickedAt: new Date(Date.now() - 16 * 60 * 1000).toISOString() },
+  ]) {
+    assert.equal((await request(manualUrl(), "POST", body)).status, 400);
+  }
+  assert.deepEqual(donations, original);
 });
 
 test("cancel preserves completed and waiting history and excludes all canceled rows from next", async () => {

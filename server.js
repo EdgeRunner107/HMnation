@@ -45,6 +45,63 @@ function buildDonationAlertText(donorName, donationText) {
   return `${name} ${text}`;
 }
 
+const MANUAL_CLICK_WINDOW_MS = 15 * 60 * 1000;
+
+function parseManualDonation(body, now = Date.now()) {
+  const {
+    nickname = '',
+    amount,
+    message = '',
+    executionStatus,
+    clickedAt
+  } = body || {};
+
+  if (typeof nickname !== 'string' || nickname.trim().length > 100) {
+    return { error: 'Invalid nickname' };
+  }
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    return { error: 'Amount must be a positive integer' };
+  }
+  if (typeof message !== 'string' || message.length > 1000) {
+    return { error: 'Invalid message' };
+  }
+  if (!['pending', 'completed'].includes(executionStatus)) {
+    return { error: 'Invalid execution status' };
+  }
+  if (
+    typeof clickedAt !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:?\d{2})$/.test(clickedAt)
+  ) {
+    return { error: 'Invalid clickedAt' };
+  }
+
+  const clickedAtMs = Date.parse(clickedAt);
+  if (
+    !Number.isFinite(clickedAtMs) ||
+    Math.abs(now - clickedAtMs) > MANUAL_CLICK_WINDOW_MS
+  ) {
+    return { error: 'Invalid clickedAt' };
+  }
+
+  return {
+    donation: {
+      donor_name: nickname.trim() || '익명',
+      amount,
+      text: message.trim(),
+      // Existing queued rows are false/null and completed rows are true/timestamp.
+      // Reserve true/null for a manual donation that is stored but intentionally
+      // held outside the SVG queue until the administrator presses 실행.
+      executed: true,
+      executed_at:
+        executionStatus === 'completed'
+          ? new Date(clickedAtMs).toISOString()
+          : null,
+      canceled: false,
+      created_at: new Date(clickedAtMs).toISOString()
+    }
+  };
+}
+
 app.use(cors())
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -245,6 +302,53 @@ app.get(['/api/u', '/api/u/:login_id'], async (req, res) => {
   }
 });
 
+app.post('/api/u/:login_id/manual-donations', async (req, res) => {
+  const { login_id } = req.params;
+  if (!login_id || !login_id.trim()) {
+    return res.status(400).json({ ok: false, error: 'login_id is required' });
+  }
+
+  const parsed = parseManualDonation(req.body);
+  if (parsed.error) {
+    return res.status(400).json({ ok: false, error: parsed.error });
+  }
+
+  try {
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id, login_id, is_active')
+      .eq('login_id', login_id)
+      .maybeSingle();
+
+    if (userError) throw userError;
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    if (user.is_active === false) {
+      return res.status(403).json({ ok: false, error: 'User is inactive' });
+    }
+
+    const { data: donation, error: insertError } = await supabase
+      .from('bank_donations')
+      .insert({ user_id: user.id, ...parsed.donation })
+      .select('id, user_id, donor_name, amount, text, executed, canceled, created_at, executed_at')
+      .single();
+
+    if (insertError) throw insertError;
+    return res.status(201).json({
+      ok: true,
+      login_id: user.login_id,
+      donation
+    });
+  } catch (error) {
+    console.error('[MANUAL DONATION] create failed:', error);
+    return res.status(500).json({
+      ok: false,
+      error: 'Manual donation create failed'
+    });
+  }
+});
+
 app.get('/api/u/:login_id/next', async (req, res) => {
   try {
     const { login_id } = req.params;
@@ -366,6 +470,14 @@ async function updateUserDonation(req, res, values) {
 }
 
 app.post('/api/u/:login_id/donations/:id/retry', (req, res) => {
+  return updateUserDonation(req, res, {
+    executed: false,
+    executed_at: null,
+    canceled: false
+  });
+});
+
+app.post('/api/u/:login_id/donations/:id/run', (req, res) => {
   return updateUserDonation(req, res, {
     executed: false,
     executed_at: null,
