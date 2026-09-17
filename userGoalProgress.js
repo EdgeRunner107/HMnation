@@ -2,6 +2,8 @@ import { calculateGoal, readStoredAmount } from './goalProgress.js';
 
 const TOONATION_STALE_AFTER_MS = 60_000;
 const ALL_RANKS_LIMIT = 2_147_483_647;
+const ISO_DATETIME_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|([+-])(\d{2}):?(\d{2}))$/;
 
 function isMissingSchemaObject(error, postgrestCode, postgresCode) {
   return error?.code === postgrestCode || error?.code === postgresCode;
@@ -36,23 +38,49 @@ async function getUserDonationDbTotal(supabase, userId) {
   }, 0);
 }
 
-async function getUserToonationState(supabase, userId) {
+async function getUserToonationState(supabase, loginId) {
   const result = await supabase
     .from('user_toonation_goal_state')
-    .select('amount, updated_at')
-    .eq('user_id', userId)
+    .select('amount, observed_at, updated_at')
+    .eq('login_id', loginId)
     .maybeSingle();
 
-  if (
-    result.error &&
-    isMissingSchemaObject(result.error, 'PGRST205', '42P01')
-  ) {
-    // No personal Toonation storage has been installed yet. This is the same
-    // observable state as a valid user who has never submitted a snapshot.
-    return null;
-  }
   if (result.error) throw result.error;
   return result.data;
+}
+
+function normalizeObservedAt(value) {
+  if (value === undefined) return new Date().toISOString();
+  if (typeof value !== 'string') return null;
+
+  const match = value.match(ISO_DATETIME_PATTERN);
+  if (!match || !Number.isFinite(Date.parse(value))) {
+    return null;
+  }
+
+  const [, year, month, day, hour, minute, second, fraction, zone, , zoneHour, zoneMinute] = match;
+  const calendar = new Date(Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+    Number((fraction ?? '').padEnd(3, '0') || 0),
+  ));
+  if (
+    calendar.getUTCFullYear() !== Number(year) ||
+    calendar.getUTCMonth() !== Number(month) - 1 ||
+    calendar.getUTCDate() !== Number(day) ||
+    calendar.getUTCHours() !== Number(hour) ||
+    calendar.getUTCMinutes() !== Number(minute) ||
+    calendar.getUTCSeconds() !== Number(second) ||
+    (zone !== 'Z' && (Number(zoneHour) > 23 || Number(zoneMinute) > 59))
+  ) {
+    return null;
+  }
+
+  return new Date(value).toISOString();
 }
 
 // Match the existing /api/u/:login_id/... lookup and active-user checks.
@@ -78,18 +106,29 @@ export async function findUser(supabase, loginId, res) {
   return user;
 }
 
-export async function getUserGoalProgress(supabase, userId, now = Date.now()) {
+export async function getUserGoalProgress(
+  supabase,
+  userId,
+  loginId,
+  now = Date.now(),
+) {
   const [dbAmount, toonState] = await Promise.all([
     getUserDonationDbTotal(supabase, userId),
-    getUserToonationState(supabase, userId),
+    getUserToonationState(supabase, loginId),
   ]);
 
   const toonAmount = toonState ? readStoredAmount(toonState.amount) : 0;
-  const toonUpdatedAt = toonState?.updated_at ?? null;
-  if (toonState && !Number.isFinite(Date.parse(toonUpdatedAt))) {
-    throw new Error('Invalid Toonation update timestamp');
+  const toonUpdatedAt = toonState?.observed_at ?? null;
+  if (
+    toonUpdatedAt !== null &&
+    !Number.isFinite(Date.parse(toonUpdatedAt))
+  ) {
+    throw new Error('Invalid Toonation observation timestamp');
   }
   // Always recompute from the two current sources; never add to a prior total.
+  if (dbAmount > Number.MAX_SAFE_INTEGER - toonAmount) {
+    throw new Error('Invalid combined goal amount');
+  }
   const totalAmount = dbAmount + toonAmount;
   const goalAmount = calculateGoal(totalAmount);
   return {
@@ -113,7 +152,7 @@ export function registerUserGoalProgressRoutes(app, supabase) {
       return res.json({
         ok: true,
         login_id: user.login_id,
-        ...(await getUserGoalProgress(supabase, user.id)),
+        ...(await getUserGoalProgress(supabase, user.id, user.login_id)),
       });
     } catch (error) {
       console.error('[USER GOAL PROGRESS] lookup failed:', error);
@@ -134,35 +173,56 @@ export function registerUserGoalProgressRoutes(app, supabase) {
     if (req.get('authorization') !== `Bearer ${token}`) {
       return res.status(401).json({ ok: false, error: 'Invalid collector token' });
     }
-    const { amount } = req.body || {};
+    const { amount, observedAt } = req.body || {};
     if (typeof amount !== 'number' || !Number.isSafeInteger(amount) || amount < 0) {
-      return res.status(400).json({
-        ok: false,
-        error: 'amount must be a non-negative safe integer',
-      });
+      return res.status(400).json({ ok: false, error: 'Invalid amount' });
+    }
+    const normalizedObservedAt = normalizeObservedAt(observedAt);
+    if (!normalizedObservedAt) {
+      return res.status(400).json({ ok: false, error: 'Invalid observedAt' });
     }
 
     try {
       const user = await findUser(supabase, req.params.login_id, res);
       if (!user) return;
-      // Only the URL-resolved user owns this snapshot; ignore body user IDs.
+
+      const current = await getUserToonationState(supabase, user.login_id);
+      if (
+        current &&
+        Date.parse(normalizedObservedAt) < Date.parse(current.observed_at)
+      ) {
+        return res.json({
+          ok: true,
+          ignored: true,
+          reason: 'older_observation',
+          toonAmount: readStoredAmount(current.amount),
+          toonUpdatedAt: current.observed_at,
+        });
+      }
+
+      // Store one replaceable current snapshot per URL-resolved login_id.
       const { data, error } = await supabase
         .from('user_toonation_goal_state')
         .upsert(
-          { user_id: user.id, amount, updated_at: new Date().toISOString() },
-          { onConflict: 'user_id' },
+          {
+            login_id: user.login_id,
+            amount,
+            observed_at: normalizedObservedAt,
+          },
+          { onConflict: 'login_id' },
         )
-        .select('amount, updated_at')
+        .select('amount, observed_at, updated_at')
         .single();
       if (error) throw error;
       return res.json({
         ok: true,
+        ignored: false,
         login_id: user.login_id,
         toonAmount: readStoredAmount(data.amount),
-        toonUpdatedAt: data.updated_at,
+        toonUpdatedAt: data.observed_at,
       });
     } catch (error) {
-      console.error('[USER TOONATION GOAL] update failed:', error);
+      console.error('[TOONATION GOAL] update failed:', error);
       return res.status(500).json({ ok: false, error: 'User Toonation goal update failed' });
     }
   });

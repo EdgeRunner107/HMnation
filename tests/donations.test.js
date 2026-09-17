@@ -123,15 +123,15 @@ before(async () => {
     }
     if (req.path === "/user_toonation_goal_state") {
       if (req.method === "POST") {
-        assert.equal(req.query.on_conflict, "user_id");
+        assert.equal(req.query.on_conflict, "login_id");
         assert.ok(req.headers.prefer.includes("resolution=merge-duplicates"));
-        const snapshot = { ...req.body };
-        userToonGoalStates.set(String(snapshot.user_id), snapshot);
+        const snapshot = { ...req.body, updated_at: new Date().toISOString() };
+        userToonGoalStates.set(snapshot.login_id, snapshot);
         return res.json(snapshot);
       }
       assert.equal(req.method, "GET");
-      assert.ok(req.query.user_id.startsWith("eq."));
-      const snapshot = userToonGoalStates.get(req.query.user_id.slice(3));
+      assert.ok(req.query.login_id.startsWith("eq."));
+      const snapshot = userToonGoalStates.get(req.query.login_id.slice(3));
       return res.json(snapshot ? [snapshot] : []);
     }
     if (req.path === "/toonation_goal_state") {
@@ -945,9 +945,14 @@ async function postUserGoal(loginId, amount, token = "collector-test-token", ext
 
 test("personal graph: separates both sources by URL user and never reads the global snapshot", async (context) => {
   configureGoalToken(context);
+  const observedAt = new Date().toISOString();
   toonGoalState = { id: 1, amount: 999999, updated_at: new Date().toISOString() };
-  assert.equal((await postUserGoal("testuser", 11900)).status, 200);
-  assert.equal((await postUserGoal("SA58PARA", 25000)).status, 200);
+  assert.equal((await postUserGoal("testuser", 11900, undefined, {
+    observedAt,
+  })).status, 200);
+  assert.equal((await postUserGoal("SA58PARA", 25000, undefined, {
+    observedAt,
+  })).status, 200);
   for (const [loginId, dbAmount, toonAmount] of [
     ["testuser", 50000, 11900], ["SA58PARA", 9000, 25000],
   ]) {
@@ -968,21 +973,26 @@ test("personal graph: separates both sources by URL user and never reads the glo
 
 test("personal graph: repeated/decreasing snapshots replace only the URL user's amount", async (context) => {
   configureGoalToken(context);
+  const observedAtBase = Date.now();
   const originalDonations = structuredClone(donations);
-  await postUserGoal("SA58PARA", 25000);
-  const otherSnapshot = structuredClone(userToonGoalStates.get("2"));
-  for (const amount of [11900, 11900, 21900, 7000, 0]) {
+  await postUserGoal("SA58PARA", 25000, undefined, {
+    observedAt: new Date(observedAtBase).toISOString(),
+  });
+  const otherSnapshot = structuredClone(userToonGoalStates.get("SA58PARA"));
+  for (const [index, amount] of [11900, 11900, 21900, 7000, 0].entries()) {
     // Body IDs cannot redirect the write away from the URL user.
     const updated = await postUserGoal("testuser", amount, undefined, {
       user_id: 2, login_id: "SA58PARA",
+      observedAt: new Date(observedAtBase + index).toISOString(),
     });
     assert.equal(updated.status, 200);
+    assert.equal(updated.data.ignored, false);
     assert.equal(updated.data.login_id, "testuser");
     for (let poll = 0; poll < 2; poll += 1) {
       const { data } = await request(userGoalUrl());
       assert.equal(data.totalAmount, 50000 + amount);
     }
-    assert.deepEqual(userToonGoalStates.get("2"), otherSnapshot);
+    assert.deepEqual(userToonGoalStates.get("SA58PARA"), otherSnapshot);
   }
   assert.deepEqual(donations, originalDonations);
   assert.equal(toonGoalState, null);
@@ -995,13 +1005,30 @@ test("personal graph: no snapshot starts at zero and stale data keeps its amount
   assert.equal(initial.data.totalAmount, 50000);
   assert.equal(initial.data.toonUpdatedAt, null);
   assert.equal(initial.data.isToonStale, true);
-  userToonGoalStates.set("1", { amount: "11900", updated_at: "2000-01-01T00:00:00Z" });
+  userToonGoalStates.set("testuser", {
+    login_id: "testuser",
+    amount: "11900",
+    observed_at: "2000-01-01T00:00:00Z",
+    updated_at: "2000-01-01T00:00:00Z",
+  });
   const stale = await request(userGoalUrl());
   assert.equal(stale.data.totalAmount, 61900);
   assert.equal(stale.data.isToonStale, true);
+
+  userToonGoalStates.set("testuser", {
+    login_id: "testuser",
+    amount: "25000",
+    observed_at: null,
+    updated_at: "2000-01-01T00:00:00Z",
+  });
+  const unknownObservationTime = await request(userGoalUrl());
+  assert.equal(unknownObservationTime.status, 200);
+  assert.equal(unknownObservationTime.data.totalAmount, 75000);
+  assert.equal(unknownObservationTime.data.toonUpdatedAt, null);
+  assert.equal(unknownObservationTime.data.isToonStale, true);
 });
 
-test("personal graph: missing optional migration falls back to Ranking and zero Toonation", async () => {
+test("personal graph: keeps the existing Ranking fallback for the bank total", async () => {
   rankingResult = [
     { donor_name: "A", total_amount: "10000" },
     { donor_name: "B", total_amount: "25000" },
@@ -1011,12 +1038,6 @@ test("personal graph: missing optional migration falls back to Ranking and zero 
       return {
         status: 404,
         body: { code: "PGRST202", message: "Function not found" },
-      };
-    }
-    if (call.path === "/user_toonation_goal_state") {
-      return {
-        status: 404,
-        body: { code: "PGRST205", message: "Table not found" },
       };
     }
     return false;
@@ -1071,11 +1092,53 @@ test("personal graph: preserves collector authentication and validates writes be
   configureGoalToken(context);
   assert.equal((await postUserGoal("testuser", 100, "wrong")).status, 401);
   for (const amount of [-1, 1.1, "11900", null, {}, [], Number.MAX_SAFE_INTEGER + 1]) {
-    assert.equal((await postUserGoal("testuser", amount)).status, 400);
+    const result = await postUserGoal("testuser", amount);
+    assert.equal(result.status, 400);
+    assert.equal(result.data.error, "Invalid amount");
+  }
+  for (const observedAt of [
+    null,
+    0,
+    "",
+    "2026-09-17",
+    "2026-02-30T12:00:00.000Z",
+    "not-a-date",
+  ]) {
+    const result = await postUserGoal("testuser", 11900, undefined, { observedAt });
+    assert.equal(result.status, 400);
+    assert.equal(result.data.error, "Invalid observedAt");
   }
   delete process.env.TOONATION_GOAL_TOKEN;
   assert.equal((await postUserGoal("testuser", 100)).status, 503);
   assert.equal(calls.length, 0);
+});
+
+test("personal graph: ignores a delayed older observation and retains the latest snapshot", async (context) => {
+  configureGoalToken(context);
+  const newerObservedAt = new Date().toISOString();
+  const olderObservedAt = new Date(Date.parse(newerObservedAt) - 10_000).toISOString();
+
+  const newer = await postUserGoal("testuser", 140000, undefined, {
+    observedAt: newerObservedAt,
+  });
+  assert.equal(newer.status, 200);
+  assert.equal(newer.data.ignored, false);
+
+  const delayed = await postUserGoal("testuser", 130000, undefined, {
+    observedAt: olderObservedAt,
+  });
+  assert.deepEqual(delayed, {
+    status: 200,
+    data: {
+      ok: true,
+      ignored: true,
+      reason: "older_observation",
+      toonAmount: 140000,
+      toonUpdatedAt: newerObservedAt,
+    },
+  });
+  assert.equal(userToonGoalStates.get("testuser").amount, 140000);
+  assert.equal(userToonGoalStates.get("testuser").observed_at, newerObservedAt);
 });
 
 test("personal graph: supports encoded login IDs and actual string user IDs", async (context) => {
@@ -1084,12 +1147,14 @@ test("personal graph: supports encoded login IDs and actual string user IDs", as
   const loginId = "방송+one/%";
   users.push({ id, login_id: loginId, is_active: true });
   userGoalDbTotals.set(id, "35000");
-  assert.equal((await postUserGoal(loginId, 11900)).status, 200);
+  assert.equal((await postUserGoal(loginId, 11900, undefined, {
+    observedAt: "2026-09-17T12:00:00.000Z",
+  })).status, 200);
   const result = await request(userGoalUrl(loginId));
   assert.equal(result.status, 200);
   assert.equal(result.data.login_id, loginId);
   assert.equal(result.data.totalAmount, 46900);
-  assert.equal(userToonGoalStates.get(id).user_id, id);
+  assert.equal(userToonGoalStates.get(loginId).login_id, loginId);
 });
 
 test("personal graph: goal boundaries and percentage follow the current personal total", async () => {
@@ -1121,23 +1186,27 @@ test("personal graph: read failures and invalid stored values return errors, nev
   }
   userGoalDbTotals.set("1", "50000");
   for (const snapshot of [
-    { amount: null, updated_at: new Date().toISOString() },
-    { amount: 11900, updated_at: null },
-    { amount: 11900, updated_at: "invalid" },
+    { amount: null, observed_at: new Date().toISOString() },
+    { amount: 11900, observed_at: "invalid" },
   ]) {
-    userToonGoalStates.set("1", snapshot);
+    userToonGoalStates.set("testuser", snapshot);
     assert.equal((await request(userGoalUrl())).status, 500);
   }
   userGoalDbTotals.set("1", String(Number.MAX_SAFE_INTEGER));
-  userToonGoalStates.set("1", { amount: 1, updated_at: new Date().toISOString() });
+  userToonGoalStates.set("testuser", {
+    login_id: "testuser",
+    amount: 1,
+    observed_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
   assert.equal((await request(userGoalUrl())).status, 500);
 });
 
 test("personal graph: a failed write retains the user's previous snapshot", async (context) => {
   configureGoalToken(context);
   await postUserGoal("testuser", 11900);
-  const before = structuredClone(userToonGoalStates.get("1"));
+  const before = structuredClone(userToonGoalStates.get("testuser"));
   failRequest = (call) => call.path === "/user_toonation_goal_state" && call.method === "POST";
   assert.equal((await postUserGoal("testuser", 21900)).status, 500);
-  assert.deepEqual(userToonGoalStates.get("1"), before);
+  assert.deepEqual(userToonGoalStates.get("testuser"), before);
 });
