@@ -1135,36 +1135,25 @@ app.post('/api/donations/:id/complete', async (req, res) => {
 //
 // ======================================================
 app.post('/accountgetter/:login_id', async (req, res) => {
-
   const { login_id } = req.params;
 
   try {
-
     // ==================================================
     // 1. 휴대폰에서 들어온 원본 문자 추출
     // ==================================================
 
     let rawText = '';
 
-    // text/plain으로 들어온 경우
     if (typeof req.body === 'string') {
-
       rawText = req.body;
-
-    }
-
-    // JSON으로 들어온 경우
-    else if (req.body && typeof req.body === 'object') {
-
+    } else if (req.body && typeof req.body === 'object') {
       rawText =
         req.body.text ||
         req.body.message ||
         req.body.sms ||
         req.body.body ||
         '';
-
     }
-
 
     console.log('\n========================================');
     console.log('[ACCOUNTGETTER] 📱 문자 수신');
@@ -1174,20 +1163,16 @@ app.post('/accountgetter/:login_id', async (req, res) => {
     console.log('원본 문자:\n' + rawText);
     console.log('========================================\n');
 
-
     // ==================================================
-    // 2. 문자 존재 여부
+    // 2. 문자 존재 여부 확인
     // ==================================================
 
     if (!rawText || typeof rawText !== 'string') {
-
       return res.status(400).json({
         ok: false,
         error: 'SMS text is required'
       });
-
     }
-
 
     // ==================================================
     // 3. 줄 단위 정리
@@ -1198,319 +1183,212 @@ app.post('/accountgetter/:login_id', async (req, res) => {
       .map((line) => line.trim())
       .filter(Boolean);
 
-
-    console.log(
-      '[ACCOUNTGETTER] 문자 줄:',
-      lines
-    );
-
+    console.log('[ACCOUNTGETTER] 문자 줄:', lines);
 
     // ==================================================
     // 4. 입금 금액 파싱
-    //
-    // 지원 형식 1
-    // 입금 10,000원
-    //
-    // 지원 형식 2
-    // 5,000원 입금 되었어요.
     // ==================================================
 
     let amount = null;
     let depositIndex = -1;
     let kakaoPaySecurities = false;
 
-
-    // --------------------------------------------------
-    // 기존 은행 문자 형식
-    //
-    // 입금 10,000원
-    // --------------------------------------------------
-
+    // 일반 은행 문자: 입금 10,000원
     depositIndex = lines.findIndex((line) =>
       /^입금\s*/.test(line)
     );
 
-
     if (depositIndex !== -1) {
-
-      const depositLine =
-        lines[depositIndex];
-
-
-      const amountMatch =
-        depositLine.match(
-          /입금\s*([\d,]+)\s*원?/
-        );
-
+      const depositLine = lines[depositIndex];
+      const amountMatch = depositLine.match(
+        /입금\s*([\d,]+)\s*원?/
+      );
 
       if (amountMatch) {
-
-        amount =
-          Number(
-            amountMatch[1]
-              .replace(/,/g, '')
-          );
-
+        amount = Number(amountMatch[1].replace(/,/g, ''));
       }
-
     }
 
-
     // --------------------------------------------------
-    // 카카오페이증권 형식
-    //
-    // 5,000원 입금 되었어요.
+    // 카카오페이증권: 기존 로직 유지
+    // 예: 5,000원 입금 되었어요.
     // --------------------------------------------------
 
     if (!amount) {
-
-      const kakaoIndex =
-        lines.findIndex((line) =>
-          /^\s*[\d,]+\s*원\s*입금/.test(line)
-        );
-
+      const kakaoIndex = lines.findIndex((line) =>
+        /^\s*[\d,]+\s*원\s*입금/.test(line)
+      );
 
       if (kakaoIndex !== -1) {
-
-        const kakaoLine =
-          lines[kakaoIndex];
-
-
-        const kakaoAmountMatch =
-          kakaoLine.match(
-            /([\d,]+)\s*원\s*입금/
-          );
-
+        const kakaoLine = lines[kakaoIndex];
+        const kakaoAmountMatch = kakaoLine.match(
+          /([\d,]+)\s*원\s*입금/
+        );
 
         if (kakaoAmountMatch) {
+          amount = Number(
+            kakaoAmountMatch[1].replace(/,/g, '')
+          );
 
-          amount =
-            Number(
-              kakaoAmountMatch[1]
-                .replace(/,/g, '')
-            );
-
-
-          depositIndex =
-            kakaoIndex;
-
-
-          kakaoPaySecurities =
-            true;
-
+          depositIndex = kakaoIndex;
+          kakaoPaySecurities = true;
         }
-
       }
-
     }
 
-
-    // --------------------------------------------------
-    // 금액을 찾지 못한 경우
-    // --------------------------------------------------
-
-    if (
-      !Number.isFinite(amount) ||
-      amount <= 0
-    ) {
-
+    if (!Number.isFinite(amount) || amount <= 0) {
       console.log(
         '[ACCOUNTGETTER] ❌ 입금 금액을 찾지 못함'
       );
-
 
       return res.status(400).json({
         ok: false,
         error: 'Deposit amount not found'
       });
-
     }
 
-
     // ==================================================
-    // 5. 입금자 정보 찾기
+    // 5. 입금자 / 후원 텍스트 찾기
     // ==================================================
 
     let rawDonorText = '';
 
-
-    // --------------------------------------------------
-    // 카카오페이증권
-    //
-    // 문자에 입금자명이 없으므로 익명 처리
-    // --------------------------------------------------
-
+    // 카카오페이증권: 기존 익명 처리 유지
     if (kakaoPaySecurities) {
-
-      rawDonorText =
-        '익명';
-
+      rawDonorText = '익명';
 
       console.log(
         '[ACCOUNTGETTER] 카카오페이증권 알림 감지'
       );
-
-
       console.log(
         '[ACCOUNTGETTER] 입금자명이 없어 익명 처리'
       );
+    } else {
+      // ------------------------------------------------
+      // 일반 은행 문자
+      //
+      // 입금 줄 이후부터 순서대로 검사한다.
+      // 잔액 / 계좌번호 / 은행명 줄은 제외한다.
+      // 처음 나오는 일반 텍스트를 선택한다.
+      //
+      // 우리은행:
+      // 입금 10,000원
+      // 경석 멍충잉       ← 선택
+      // 잔액 22,056원     ← 제외
+      //
+      // 기업은행:
+      // 입금 500,000원
+      // 잔액 500,000원    ← 제외
+      // 경석/유하유하     ← 선택
+      // 666***58901011    ← 제외
+      // 기업             ← 제외
+      // ------------------------------------------------
 
-    }
+      const afterDepositLines = lines.slice(
+        depositIndex + 1
+      );
 
+      const isExcludedBankLine = (line) => {
+        const text = line.trim();
 
-    // --------------------------------------------------
-    // 기존 은행 문자
-    //
-    // 입금 1,000원
-    // 잔액 4,607원
-    // 경석/되냐
-    // 666***58901011
-    // 기업
-    // --------------------------------------------------
+        // 빈 줄 제외
+        if (!text) {
+          return true;
+        }
 
-    else {
+        // 잔액 정보가 담긴 줄 전체 제외
+        if (/^잔액\s*/.test(text)) {
+          return true;
+        }
 
-      const balanceIndex =
-        lines.findIndex(
-          (line, index) =>
-            index > depositIndex &&
-            /^잔액\s*/.test(line)
-        );
+        // 계좌번호 형태 제외
+        // 예: *745177, 666***58901011, 123-456-789
+        if (/^[\d*\-\s]+$/.test(text)) {
+          return true;
+        }
 
+        // 은행명만 단독으로 표시된 줄 제외
+        if (
+          /^(?:(?:기업|우리|국민|신한|하나|농협)(?:은행)?|IBK기업은행|KB국민은행|NH농협은행|카카오뱅크|토스뱅크|케이뱅크)$/.test(text)
+        ) {
+          return true;
+        }
 
-      if (
-        balanceIndex !== -1 &&
-        lines[balanceIndex + 1]
-      ) {
+        return false;
+      };
 
-        rawDonorText =
-          lines[balanceIndex + 1];
+      const donorLine = afterDepositLines.find(
+        (line) => !isExcludedBankLine(line)
+      );
 
+      if (donorLine) {
+        rawDonorText = donorLine.trim();
       }
 
-
-      // 기존 fallback 유지
-      if (!rawDonorText) {
-
-        rawDonorText =
-          lines[depositIndex + 2] || '';
-
-      }
-
+      console.log(
+        '[ACCOUNTGETTER] 입금 이후 줄:',
+        afterDepositLines
+      );
+      console.log(
+        '[ACCOUNTGETTER] 선택된 입금자/텍스트:',
+        rawDonorText
+      );
     }
-
 
     if (!rawDonorText) {
-
       return res.status(400).json({
         ok: false,
         error: 'Donor name not found'
       });
-
     }
 
-
     // ==================================================
-    // 6. 닉네임 / 텍스트 분리
+    // 6. 닉네임 / 텍스트 분리: 기존 로직 유지
     //
-    // "경석/되냐"
-    // donor_name = "경석"
-    // text       = "되냐"
+    // 경석/유하유하
+    // → donor_name: 경석, text: 유하유하
     //
-    // "안녕하세요" (구분자가 없으면 익명)
-    // donor_name = "익명"
-    // text       = "안녕하세요"
+    // 경석 멍충잉
+    // → donor_name: 익명, text: 경석 멍충잉
     //
-    // "경석/오늘/방송/화이팅"
-    // donor_name = "경석"
-    // text       = "오늘/방송/화이팅"
-    //
-    // 카카오페이증권
-    // donor_name = "익명"
-    // text       = "익명"
+    // 경석/오늘/방송/화이팅
+    // → donor_name: 경석, text: 오늘/방송/화이팅
     // ==================================================
 
-    let donorName =
-      '익명';
-
-    let donationText =
-      rawDonorText.trim();
-
+    let donorName = '익명';
+    let donationText = rawDonorText.trim();
 
     if (rawDonorText.includes('/')) {
+      const slashIndex = rawDonorText.indexOf('/');
 
-      const slashIndex =
-        rawDonorText.indexOf('/');
+      const nicknamePart = rawDonorText
+        .slice(0, slashIndex)
+        .trim();
 
-
-      const nicknamePart =
-        rawDonorText
-          .slice(0, slashIndex)
-          .trim();
-
-
-      const textPart =
-        rawDonorText
-          .slice(slashIndex + 1)
-          .trim();
-
+      const textPart = rawDonorText
+        .slice(slashIndex + 1)
+        .trim();
 
       if (nicknamePart) {
-
-        donorName =
-          nicknamePart;
-
+        donorName = nicknamePart;
       }
-
 
       if (textPart) {
-
-        donationText =
-          textPart;
-
+        donationText = textPart;
       } else {
-
-        donationText =
-          donorName;
-
+        donationText = donorName;
       }
-
     }
-
 
     // ==================================================
     // 7. 최종 파싱 로그
     // ==================================================
 
-    console.log(
-      '[ACCOUNTGETTER] ✅ 문자 파싱 완료'
-    );
-
-
-    console.log(
-      '원본 입금자 문자열:',
-      rawDonorText
-    );
-
-
-    console.log(
-      '후원자명:',
-      donorName
-    );
-
-
-    console.log(
-      '텍스트:',
-      donationText
-    );
-
-
-    console.log(
-      '금액:',
-      amount
-    );
-
-
+    console.log('[ACCOUNTGETTER] ✅ 문자 파싱 완료');
+    console.log('원본 입금자 문자열:', rawDonorText);
+    console.log('후원자명:', donorName);
+    console.log('텍스트:', donationText);
+    console.log('금액:', amount);
     console.log(
       '형식:',
       kakaoPaySecurities
@@ -1518,130 +1396,88 @@ app.post('/accountgetter/:login_id', async (req, res) => {
         : '기존 은행문자'
     );
 
-
     // ==================================================
     // 8. 유저 확인
     // ==================================================
 
-    const {
-      data: user,
-      error: userError
-    } = await supabase
+    const { data: user, error: userError } = await supabase
       .from('users')
-      .select(
-        'id, login_id, is_active'
-      )
-      .eq(
-        'login_id',
-        login_id
-      )
+      .select('id, login_id, is_active')
+      .eq('login_id', login_id)
       .maybeSingle();
 
-
     if (userError) {
-
       console.error(
         '[ACCOUNTGETTER] 유저 조회 오류:',
         userError
       );
 
-
       return res.status(500).json({
         ok: false,
         error: 'User lookup failed'
       });
-
     }
 
-
     if (!user) {
-
       return res.status(404).json({
         ok: false,
         error: 'User not found'
       });
-
     }
 
-
     if (user.is_active === false) {
-
       return res.status(403).json({
         ok: false,
         error: 'User is inactive'
       });
-
     }
-
 
     // ==================================================
     // 9. bank_donations 저장
     // ==================================================
 
     const insertData = {
-
-      user_id:
-        user.id,
-
-      donor_name:
-        donorName,
-
-      amount:
-        amount,
-
-      text:
-        donationText,
-
-      executed:
-        false
-
+      user_id: user.id,
+      donor_name: donorName,
+      amount: amount,
+      text: donationText,
+      executed: false
     };
-
 
     console.log(
       '[ACCOUNTGETTER] DB 저장 예정:',
       insertData
     );
 
-
-    const {
-      data: donation,
-      error: insertError
-    } = await supabase
-      .from('bank_donations')
-      .insert(
-        insertData
-      )
-      .select(`
-        id,
-        user_id,
-        donor_name,
-        amount,
-        text,
-        executed,
-        created_at
-      `)
-      .single();
-
+    const { data: donation, error: insertError } =
+      await supabase
+        .from('bank_donations')
+        .insert(insertData)
+        .select(`
+          id,
+          user_id,
+          donor_name,
+          amount,
+          text,
+          executed,
+          created_at
+        `)
+        .single();
 
     if (insertError) {
-
       console.error(
         '[ACCOUNTGETTER] DB 저장 실패:',
         insertError
       );
 
-
       return res.status(500).json({
         ok: false,
         error: 'Donation insert failed'
       });
-
     }
 
-
     // ==================================================
-    // 10. 성공
+    // 10. 성공 응답
     // ==================================================
 
     console.log('\n----------------------------------------');
@@ -1653,51 +1489,30 @@ app.post('/accountgetter/:login_id', async (req, res) => {
     console.log('executed:', donation.executed);
     console.log('----------------------------------------\n');
 
-
     return res.status(201).json({
-
       ok: true,
-
-      source:
-        kakaoPaySecurities
-          ? 'kakaopay_securities'
-          : 'bank',
-
+      source: kakaoPaySecurities
+        ? 'kakaopay_securities'
+        : 'bank',
       parsed: {
-
-        donor_name:
-          donorName,
-
-        amount:
-          amount,
-
-        text:
-          donationText
-
+        donor_name: donorName,
+        amount: amount,
+        text: donationText
       },
-
       donation
-
     });
-
-
   } catch (error) {
-
     console.error(
       '[ACCOUNTGETTER] 예상하지 못한 오류:',
       error
     );
 
-
     return res.status(500).json({
       ok: false,
       error: 'Internal server error'
     });
-
   }
-
 });
-
 
 
 // ======================================================
